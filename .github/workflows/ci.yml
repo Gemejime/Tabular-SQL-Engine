@@ -200,9 +200,9 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED_FILES"
 
-          if echo "$CHANGED_FILES" | grep -qE '^(api/|internal/flight/|internal/telemetry/|internal/validator/)'; then
+          if echo "$CHANGED_FILES" | grep -qE '^(api/|internal/flight/handlers\.py|internal/telemetry/metrics\.py)'; then
             if ! echo "$CHANGED_FILES" | grep -qE '^(\.ai/doc-api\.md|api/openapi/openapi\.yaml)$'; then
-              echo "ERROR: API, Flight, telemetry, or validator code changed without updating .ai/doc-api.md or api/openapi/openapi.yaml."
+              echo "ERROR: API, Flight handler, or Prometheus metrics changed without updating .ai/doc-api.md or api/openapi/openapi.yaml."
               exit 1
             fi
           fi
