@@ -48,7 +48,7 @@ Aligned with `Production Grade Backend Concepts.pdf`:
 - **S3 Range-Read Streaming (`internal/storage/s3_streamer.py`)**:
   - Fetches un-cached Parquet artifacts from S3 over internal VPC endpoints using ranged reads (`aiobotocore`/`s3fs`), streaming chunks to disk without monolithic byte-array buffering on the Python heap.
 - **Query Bounds & Chunked IPC**:
-  - Aggregate DuckDB budget (`<= 2.5 GiB` total across `POOL_SIZE` workers, e.g., `memory_limit = floor(2.5 GiB / POOL_SIZE)`) and `5s` hard timeout prevent runaway joins or memory exhaustion.
+  - Aggregate DuckDB budget (`<= 2.5 GiB` total across `POOL_SIZE` workers, e.g., `memory_limit = floor(2.5 GiB / POOL_SIZE)`) bounds only DuckDB's buffer manager, not total process RSS. Enforce a per-worker process memory boundary (e.g., `resource.setrlimit` `RLIMIT_AS`/`RLIMIT_DATA` in the child or supervisor RSS monitoring with `SIGKILL` + respawn) so DuckDB buffers, complex aggregate/hash state, query result batches, and Python/PyArrow overhead stay within the shared `6.0 GiB` pod cgroup budget, alongside the `5s` hard timeout.
   - Subprocesses stream Arrow `RecordBatchReader` chunks over pipes/Unix sockets (no `/dev/shm`, avoiding `SIGBUS`; no `fetch_arrow_table()` full materialization).
 
 ### Layer 3: Architecture & Scale
@@ -71,7 +71,7 @@ Aligned with `Production Grade Backend Concepts.pdf`:
 - **Deterministic SQL AST Whitelisting (`ADR-005`, `internal/validator/`)**:
   - `sqlglot` permits only read-only `Select`, `With` (CTEs), and `Union` (`UNION`/`INTERSECT`/`EXCEPT`) constructs and pre-approved functions; blocks DML/DDL, `PRAGMA`, `SET`, `RESET`, `COPY ... TO`, `ATTACH`, `DETACH`, `LOAD`, `INSTALL`, `SUMMARIZE`, `DESCRIBE`, `SHOW`, `PIVOT`, and DuckDB filesystem functions (`read_csv`, `read_parquet`, `scan_parquet`, `write_csv`), while relying on the `5s` timeout for Cartesian explosion protection.
 - **DuckDB Sandbox Locks (`internal/sandbox/security_profile.py`)**:
-  - `duckdb.connect(":memory:")` binds the single validated `{hash}.parquet` view first, then immediately locks `enable_external_access=false`, `temp_directory=''`, `threads=2`, and per-worker `memory_limit` before executing user SQL.
+  - Targeting pinned `duckdb >= 1.2.0` (which supports `allowed_paths`), `duckdb.connect(":memory:")` sets `allowed_paths = ['<validated_parquet_path>']` (permitting only the single validated `{hash}.parquet` cache file) before binding the view and immediately locking `enable_external_access=false`, `lock_configuration=true`, `temp_directory=''`, `threads=2`, and per-worker `memory_limit` prior to executing user SQL.
 - **Secured Logging & Container Hardening**:
   - Structured JSON logs with redaction of credentials, tokens, presigned S3 query params, and PII; non-root container with `jemalloc` preloaded.
 

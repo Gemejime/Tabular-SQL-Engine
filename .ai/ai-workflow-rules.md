@@ -3,7 +3,7 @@
 ## Development Approach
 
 Build this microservice incrementally following a spec-driven workflow:
-- The specification documents in `tasks/` (including `Tabular Analytics Worker Implementation Plan.pdf` and `Production Grade Backend Concepts.pdf`) and context files in [`.ai/`](.) define system invariants, data structures, and operational boundaries.
+- The tracked specification documents in [`.ai/`](.) ([`.ai.md`](../.ai.md), [`.ai/project-overview.md`](project-overview.md), [`.ai/architecture.md`](architecture.md), [`.ai/doc-api.md`](doc-api.md), [`.ai/code-standards.md`](code-standards.md), [`.ai/security.md`](security.md), and [`.ai/progress-tracker.md`](progress-tracker.md)) define system invariants, data structures, and operational boundaries (any local PDFs under `tasks/` are gitignored and not tracked).
 - Adhere strictly to the Python 3.12+ Arrow Flight + Process-Isolated DuckDB architecture and the 5 backend architectural layers documented in [`.ai/architecture.md`](architecture.md).
 - Implement against these specs without inferring undocumented dependencies or deviating from Architectural Decision Records (`ADR-001` through `ADR-005`).
 

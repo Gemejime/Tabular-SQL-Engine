@@ -103,7 +103,7 @@ Exposes Prometheus text exposition metrics (`text/plain; version=0.0.4`).
 
 ## 3. Tier-1 Cache & S3 Storage Conventions
 
-- **Local NVMe/tmpfs Path**: `<CACHE_DIR>/{table_hash}.parquet` (`10 GiB` ceiling, LRU eviction).
+- **Local Disk-Backed NVMe Path**: `<CACHE_DIR>/{s3_bucket}/{tenant_id}/{table_hash}.parquet` (`10 GiB` ceiling, LRU eviction). Cache hits are strictly scoped to the requesting `tenant_id` and `s3_bucket` (or verified against S3 object access before serving) so an artifact warmed by another tenant is never served and missing S3 objects preserve `NOT_FOUND`.
 - **S3 Source Path**: `s3://<bucket>/artifacts/<tenant_id>/<table_hash>.parquet` (hydrated via S3 range reads over internal VPC endpoints).
 
 ---

@@ -13,7 +13,7 @@ Before planning, modifying code, or making any architectural decision, **always 
 3. [`.ai/project-overview.md`](.ai/project-overview.md) — Product definition, strategic objectives, SLOs/SLIs, and scope boundaries
 4. [`.ai/architecture.md`](.ai/architecture.md) — 5-layer backend architecture, memory partitioning (`6.0 GiB` pod / `2.5 GiB` DuckDB), and folder structure
 5. [`.ai/doc-api.md`](.ai/doc-api.md) — Authoritative OpenAPI 3.1 HTTP ops endpoints, Arrow Flight IPC (`DoGet`/`DoAction`) contracts, and Prometheus metrics
-6. [`.ai/code-standards.md`](.ai/code-standards.md) — Python 3.12+, `ruff`, `mypy`, `ProcessPoolExecutor` (`max_tasks_per_child=100`), `sqlglot` AST checks, and `jemalloc` hygiene
+6. [`.ai/code-standards.md`](.ai/code-standards.md) — Python 3.12+, `ruff`, `mypy`, `pebble.ProcessPool` / `multiprocessing` supervisor (`max_tasks=100`, keeping sibling queries serviceable after a worker timeout per `ADR-001`), `sqlglot` AST checks, and `jemalloc` hygiene
 7. [`.ai/security.md`](.ai/security.md) — Threat model, DuckDB sandbox locks (`enable_external_access=false`, `temp_directory=''`), and Secured Logging invariants
 8. [`.ai/ai-workflow-rules.md`](.ai/ai-workflow-rules.md) — Spec-driven workflow, human-in-the-loop rules, and pre-commit verification checklist
 9. [`.ai/progress-tracker.md`](.ai/progress-tracker.md) — 4-phase roadmap (Weeks 1–8), `ADR-001`–`ADR-005`, and operational runbooks

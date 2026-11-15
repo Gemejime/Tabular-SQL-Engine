@@ -15,8 +15,8 @@ The `rag-tabular-analytics-worker` operates as the isolated tabular SQL compute 
 2. **Deterministic SQL AST Whitelisting (`sqlglot`)**:
    - Validates every incoming SQL query within $\le 2\text{ ms}$ before execution.
    - Permits only read-only `SELECT` constructs and pre-approved function namespaces; blocks DML/DDL, `PRAGMA`, `SET`, `COPY ... TO`, `ATTACH`, `LOAD`/`INSTALL`, and DuckDB filesystem functions (`read_csv`, `read_parquet`, `scan_parquet`, `write_csv`).
-3. **Tier-1 NVMe/tmpfs Local Parquet Cache + S3 Range-Read Hydration**:
-   - Serves content-addressed `{hash}.parquet` files from a `10 GiB` local NVMe or `emptyDir` (`tmpfs`) mount with LRU eviction and lock-free concurrent readers.
+3. **Tier-1 Disk-Backed NVMe Local Parquet Cache + S3 Range-Read Hydration**:
+   - Serves content-addressed `{hash}.parquet` files from a `10 GiB` disk-backed `emptyDir` (`medium: ""`) or local NVMe mount with LRU eviction and lock-free concurrent readers.
    - Hydrates cache misses via S3 range reads (`aiobotocore`/`s3fs`) over internal VPC endpoints without monolithic byte-array buffering on the Python heap.
 4. **Process-Isolated Disposable DuckDB Sandboxing**:
    - Dispatches queries to a `pebble.ProcessPool` (or custom `multiprocessing` supervisor, `max_tasks=100`).
@@ -33,7 +33,7 @@ The `rag-tabular-analytics-worker` operates as the isolated tabular SQL compute 
 1. **Continuous Doc API & OpenAPI Maintenance**: The [`.ai/doc-api.md`](doc-api.md) file and OpenAPI 3.1 specification (`api/openapi/openapi.yaml`) MUST be kept updated on **every code change or addition**, regardless of how small the modification is, if need be.
 2. **Secured Logging**: All logging must be structured JSON. Strictly redact authorization headers, bearer tokens, AWS credentials, presigned S3 query parameters (`X-Amz-Signature`, `X-Amz-Credential`, `X-Amz-Security-Token`), and sensitive tenant PII/PHI or raw SQL literal values before emission.
 3. **Zero-Trust DuckDB Sandboxing**: Never enable `enable_external_access` or disk spill (`temp_directory`) in DuckDB. All queries must pass `sqlglot` AST whitelisting before reaching any subprocess.
-4. **Subprocess Isolation & Memory Budget**: Never run DuckDB in-process inside the main Flight daemon thread; always use `ProcessPoolExecutor` (`max_tasks_per_child=100`) and respect the `2.5 GiB` DuckDB / `6.0 GiB` pod memory budget.
+4. **Subprocess Isolation & Memory Budget**: Never run DuckDB in-process inside the main Flight daemon thread; always use a `pebble.ProcessPool` / custom `multiprocessing` supervisor (`max_tasks=100`, keeping sibling queries serviceable after a worker timeout per `ADR-001`) and respect the `2.5 GiB` DuckDB / `6.0 GiB` pod memory budget.
 5. **Code Quality**: Code must pass `ruff check .`, `ruff format --check .`, `mypy`, `bandit`, `pip-audit`, and `pytest`.
 6. **Git Commit Standards**:
    - **Git Commit Frequency**: Commit code as you build. Every working session or phase must contain **at least two git commits**.
