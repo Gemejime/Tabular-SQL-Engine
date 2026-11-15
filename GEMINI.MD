@@ -28,7 +28,7 @@ Before planning, modifying code, or making any architectural decision, **always 
    - Emit structured JSON logs only (never raw `print()` in `cmd/`, `internal/`, or `api/`).
    - Strictly redact authorization headers, bearer tokens, AWS credentials, presigned S3 query parameters (`X-Amz-Signature`, `X-Amz-Credential`, `X-Amz-Security-Token`), and sensitive tenant PII/PHI or raw SQL literals before emission.
 3. **Process-Isolated DuckDB Sandboxing**:
-   - Never run DuckDB in the main Arrow Flight daemon process. Always execute inside `ProcessPoolExecutor` (`max_tasks_per_child=100`) with `duckdb.connect(":memory:")`, `enable_external_access=false`, `temp_directory=''`, `memory_limit='2.5GB'`, `threads=2`, and a `5s` `SIGKILL` circuit breaker.
+   - Never run DuckDB in the main Arrow Flight daemon process. Always execute inside an isolated worker pool (`pebble.ProcessPool` / `multiprocessing` supervisor, `max_tasks=100`) with `duckdb.connect(":memory:")`, `enable_external_access=false` (applied after binding the single validated `{hash}.parquet` view), `temp_directory=''`, aggregate `memory_limit <= 2.5GB` across `POOL_SIZE` workers, `threads=2`, and a `5s` per-worker `SIGKILL` circuit breaker.
    - Validate all SQL queries with `sqlglot` AST whitelisting ($\le 2\text{ ms}$) prior to subprocess dispatch.
 4. **CI & Quality Gates**:
    - All changes must pass the GitHub Actions gates in [`.github/workflows/ci.yml`](.github/workflows/ci.yml): `lint-and-typecheck`, `security-and-logging-audit`, `OpenAPI 3.1 & Doc API Contract Sync`, `test-suites`, and `container-and-helm-lint`.

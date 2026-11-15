@@ -15,9 +15,9 @@ This roadmap tracks the implementation milestones detailed in `Tabular Analytics
 
 ## 2. Architecture Decision Records (ADRs)
 
-- **ADR-001: Subprocess Worker Isolation**: Adopts disposable worker subprocesses (`ProcessPoolExecutor`, `max_tasks_per_child=100`) over in-process thread pooling to prevent native DuckDB panics or memory spikes from crashing the Arrow Flight daemon.
-- **ADR-002: Dedicated NVMe/tmpfs Local Table Caching**: Implements an explicit `10 GiB` local file cache for content-addressed `{hash}.parquet` artifacts, eliminating per-query S3 round-trips and meeting warm-cache latency targets ($P95 \le 45\text{ ms}$).
-- **ADR-003: Defensive Memory Budgeting**: Rebalances pod allocations to `6.0 GiB` total container RAM (`4.0 GiB` request) with a `2.5 GiB` internal DuckDB limit, providing $\ge 2.0\text{ GiB}$ headroom for PyArrow IPC buffers and the Python runtime plus `1.5 GiB` OS page cache margin.
+- **ADR-001: Subprocess Worker Isolation**: Adopts disposable worker subprocesses (`pebble.ProcessPool` / custom `multiprocessing` supervisor, `max_tasks=100`) over in-process thread pooling or stdlib `ProcessPoolExecutor` to allow isolated per-worker `SIGKILL` without `BrokenProcessPool` and prevent native DuckDB panics from crashing the Arrow Flight daemon.
+- **ADR-002: Dedicated NVMe Local Table Caching**: Implements an explicit disk-backed `10 GiB` NVMe `emptyDir` cache (`medium: ""`, avoiding `10 GiB` `tmpfs` inside a `6.0 GiB` pod) for content-addressed `{hash}.parquet` artifacts with single-flight coalescing, eliminating per-query S3 round-trips and meeting warm-cache latency targets ($P95 \le 45\text{ ms}$).
+- **ADR-003: Defensive Memory Budgeting**: Rebalances pod allocations to `6.0 GiB` total container RAM (`4.0 GiB` request) with a `2.5 GiB` aggregate DuckDB limit (`floor(2.5GB / POOL_SIZE)` per child), providing $\ge 2.0\text{ GiB}$ headroom for PyArrow IPC buffers and the Python runtime plus `1.5 GiB` OS page cache margin.
 - **ADR-004: In-Flight Concurrency Autoscaling**: Bases KEDA autoscaling rules on in-flight query operations (`tabular_worker_active_queries >= 4`) rather than raw HTTP/2 TCP connection counts.
 - **ADR-005: Query-Level AST Whitelisting via `sqlglot`**: Uses `sqlglot` to enforce read-only `SELECT` queries before engine execution, guarding against Text-to-SQL prompt injection risks.
 

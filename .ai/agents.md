@@ -19,9 +19,9 @@ The `rag-tabular-analytics-worker` operates as the isolated tabular SQL compute 
    - Serves content-addressed `{hash}.parquet` files from a `10 GiB` local NVMe or `emptyDir` (`tmpfs`) mount with LRU eviction and lock-free concurrent readers.
    - Hydrates cache misses via S3 range reads (`aiobotocore`/`s3fs`) over internal VPC endpoints without monolithic byte-array buffering on the Python heap.
 4. **Process-Isolated Disposable DuckDB Sandboxing**:
-   - Dispatches queries to a `ProcessPoolExecutor` (`max_tasks_per_child=100`).
-   - Each child subprocess runs an ephemeral `duckdb.connect(":memory:")` instance locked with `enable_external_access=false`, `temp_directory=''`, `memory_limit='2.5GB'`, and `threads=2`.
-   - Enforces a `5s` hard execution deadline via a subprocess circuit breaker (`SIGKILL` + respawn).
+   - Dispatches queries to a `pebble.ProcessPool` (or custom `multiprocessing` supervisor, `max_tasks=100`).
+   - Each child subprocess runs an ephemeral `duckdb.connect(":memory:")` instance, binds the single validated `{hash}.parquet` view, and immediately locks `enable_external_access=false`, `temp_directory=''`, per-worker `memory_limit` (aggregate $\le 2.5\text{ GiB}$), and `threads=2`.
+   - Enforces a `5s` hard execution deadline via a per-worker subprocess circuit breaker (`SIGKILL` + respawn without breaking sibling workers).
 5. **Decoupled Memory & KEDA Autoscaling**:
    - Uses `jemalloc` (`LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so`) to prevent native heap fragmentation.
    - Exposes Prometheus metrics (`tabular_worker_active_queries`, etc.) driving KEDA autoscaling (`>= 4` active queries per pod, `4..24` replicas).

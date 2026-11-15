@@ -8,9 +8,9 @@
 | **Memory Allocator** | `jemalloc` (`LD_PRELOAD`) | Mitigates native heap fragmentation across rapid Arrow IPC allocation cycles |
 | **IPC & Transport** | Apache Arrow Flight (`pyarrow.flight`) | HTTP/2 gRPC server streaming zero-copy Arrow `RecordBatch` results (`DoGet`, `DoAction`) |
 | **SQL Engine** | DuckDB (`duckdb.connect(":memory:")`) | Ephemeral in-memory C++ vectorized analytical engine inside isolated child processes |
-| **Worker Pool** | `ProcessPoolExecutor` (`max_tasks_per_child=100`) | Disposable subprocess sandboxing with `5s` circuit-breaker cancellation (`SIGKILL` + respawn) |
+| **Worker Pool** | `pebble.ProcessPool` / `multiprocessing` supervisor (`max_tasks=100`) | Disposable subprocess sandboxing with isolated per-worker `5s` `SIGKILL` + respawn (avoids stdlib `BrokenProcessPool`) |
 | **SQL Security** | `sqlglot` | Pure-Python deterministic AST whitelisting ($\le 2\text{ ms}$) before subprocess dispatch |
-| **Tier-1 Cache** | Local `10 GiB` NVMe / `tmpfs` `emptyDir` | Content-addressed `{hash}.parquet` cache with lock-free concurrent readers & LRU eviction |
+| **Tier-1 Cache** | Disk-backed `10 GiB` NVMe `emptyDir` (`medium: ""`) | Content-addressed `{hash}.parquet` cache with single-flight coalescing, in-memory LRU, & atomic `os.replace` |
 | **Object Storage** | AWS S3 (`aiobotocore` / `s3fs`) | Range-read streaming over internal VPC endpoints on cache miss (no monolithic heap buffering) |
 | **Ops & Doc API** | HTTP Ops Server + OpenAPI 3.1 | `/healthz`, `/ready`, `/metrics`, `/openapi.yaml`, `/docs` |
 | **Autoscaling** | Kubernetes + KEDA `ScaledObject` | Scales `4..24` replicas on `tabular_worker_active_queries >= 4` per pod |
@@ -33,28 +33,31 @@ Aligned with `Production Grade Backend Concepts.pdf`:
 - **Input Validation & Sanitization**:
   - Pydantic/schema validation on Flight tickets (non-empty `tenant_id`, valid SHA-256 `table_hash`, bounded SQL length) + deterministic `sqlglot` AST whitelisting ($\le 2\text{ ms}$).
 - **Rate Limiting & Backpressure**:
-  - Bounded in-flight concurrency semaphore aligned with KEDA scaling target (`tabular_worker_active_queries`) and `5s` execution deadline.
+  - Bounded in-flight concurrency semaphore (`MAX_CONCURRENT_QUERIES`) aligned with `POOL_SIZE` and KEDA scaling target (`tabular_worker_active_queries`), returning gRPC `RESOURCE_EXHAUSTED` when saturated.
 - **Idempotency**:
   - Content-addressed `{hash}.parquet` local cache keys and read-only `SELECT` execution guarantee idempotent retries from `rag-search-orchestrator`.
+- **Sync/Async Event Loop Bridge**:
+  - `pyarrow.flight.FlightServerBase` runs synchronous C++ gRPC threads; `cmd/worker/main.py` bridges S3 async hydration (`aiobotocore`) via a dedicated `asyncio` event-loop thread (`asyncio.run_coroutine_threadsafe`).
 
 ### Layer 2: Data Persistence & State
 - **Stateless Compute Tier (No Transactional DB)**:
   - `rag-tabular-analytics-worker` owns no relational database state; permanent schema cataloging and metadata belong to `rag-kb-catalog-service`.
 - **Tier-1 Local Artifact Caching (`internal/storage/cache_manager.py`)**:
-  - Stores content-addressed `{hash}.parquet` files on a `10 GiB` NVMe or `tmpfs` `emptyDir` mount.
-  - Supports lock-free concurrent readers, atomic temp-file-then-rename writes on cache hydration, and LRU eviction under disk pressure.
+  - Stores content-addressed `{hash}.parquet` files on a disk-backed `10 GiB` NVMe `emptyDir` (`medium: ""`). **Never** mount a `10 GiB` `tmpfs` (`medium: Memory`) inside a `6.0 GiB` cgroup pod (Linux charges `tmpfs` to container RAM, causing `OOMKill`); any dev/fallback `tmpfs` must be capped at $\le 1.0\text{ GiB}$.
+  - Uses single-flight download coalescing (per-`table_hash` async lock), atomic temp-file-then-rename (`os.replace`) writes, lock-free concurrent readers, and an in-memory LRU index (independent of `noatime` mounts).
 - **S3 Range-Read Streaming (`internal/storage/s3_streamer.py`)**:
-  - Fetches un-cached Parquet artifacts from S3 over internal VPC endpoints using ranged reads (`aiobotocore`/`s3fs`), avoiding monolithic byte-array buffering on the Python heap.
-- **Query Bounds**:
-  - DuckDB `memory_limit = '2.5GB'`, `threads = 2`, and `5s` hard timeout prevent runaway joins or Cartesian explosions from exhausting memory.
+  - Fetches un-cached Parquet artifacts from S3 over internal VPC endpoints using ranged reads (`aiobotocore`/`s3fs`), streaming chunks to disk without monolithic byte-array buffering on the Python heap.
+- **Query Bounds & Chunked IPC**:
+  - Aggregate DuckDB budget (`<= 2.5 GiB` total across `POOL_SIZE` workers, e.g., `memory_limit = floor(2.5 GiB / POOL_SIZE)`) and `5s` hard timeout prevent runaway joins or memory exhaustion.
+  - Subprocesses stream Arrow `RecordBatchReader` chunks over pipes/Unix sockets (no `/dev/shm`, avoiding `SIGBUS`; no `fetch_arrow_table()` full materialization).
 
 ### Layer 3: Architecture & Scale
 - **Process-Isolated Disposable Sandboxing (`internal/pool/`)**:
-  - `ProcessPoolExecutor` with `max_tasks_per_child=100` isolates native DuckDB C++ memory and panics from the host Flight daemon (`ADR-001`).
-  - `circuit_breaker.py` monitors execution deadlines (`5s`), `SIGKILL`ing runaway child processes and immediately respawning replacements (`ADR-001`).
+  - `pebble.ProcessPool` (or custom `multiprocessing.Process` supervisor) with `max_tasks=100` isolates native DuckDB C++ memory and panics from the host Flight daemon (`ADR-001`).
+  - `circuit_breaker.py` monitors per-task execution deadlines (`5s`), `SIGKILL`ing only the offending child process and immediately respawning a replacement without breaking sibling workers (`ADR-001`).
 - **Memory Partitioning Blueprint (`ADR-003`)**:
   - **Pod Cgroup Limit**: `6.0 GiB` (`4.0 GiB` request); CPU `2,000m` request / `4,000m` limit.
-  - **DuckDB Engine Ceiling**: `2.5 GiB` (`SET memory_limit = '2.5GB'`).
+  - **DuckDB Aggregate Engine Ceiling**: `2.5 GiB` total across active pool workers (`SET memory_limit = floor(2.5GB / POOL_SIZE)` per child).
   - **Host Daemon & Arrow Headroom**: $\ge 2.0\text{ GiB}$ reserved for the Python Flight daemon, PyArrow IPC buffers, AST syntax trees, and gRPC TCP frames.
   - **OS Page Cache & Buffer Overhead**: `1.5 GiB` margin below the `6.0 GiB` cgroup limit to prevent Linux OOM kills (`SIGKILL` exit 137).
 - **High Availability & KEDA Autoscaling (`ADR-004`)**:
@@ -64,11 +67,11 @@ Aligned with `Production Grade Backend Concepts.pdf`:
 
 ### Layer 4: Security & Identity
 - **Tenant Isolation**:
-  - Every Flight ticket carries `tenant_id`; S3 object keys and local table aliases are strictly scoped and validated (`table_resolver.py`) to prevent cross-tenant table access.
+  - Every Flight ticket carries `tenant_id`, `table_hash`, `s3_bucket`, and `s3_key`; `table_resolver.py` validates `s3_bucket` against an allowlist and enforces `s3_key == f"artifacts/{tenant_id}/{table_hash}.parquet"` to prevent cross-tenant confused-deputy reads.
 - **Deterministic SQL AST Whitelisting (`ADR-005`, `internal/validator/`)**:
-  - `sqlglot` permits only `Select` constructs and pre-approved functions; blocks DML/DDL, `PRAGMA`, `SET`, `RESET`, `COPY ... TO`, `ATTACH`, `DETACH`, `LOAD`, `INSTALL`, and DuckDB filesystem functions (`read_csv`, `read_parquet`, `scan_parquet`, `write_csv`).
+  - `sqlglot` permits only read-only `Select`, `With` (CTEs), and `Union` (`UNION`/`INTERSECT`/`EXCEPT`) constructs and pre-approved functions; blocks DML/DDL, `PRAGMA`, `SET`, `RESET`, `COPY ... TO`, `ATTACH`, `DETACH`, `LOAD`, `INSTALL`, `SUMMARIZE`, `DESCRIBE`, `SHOW`, `PIVOT`, and DuckDB filesystem functions (`read_csv`, `read_parquet`, `scan_parquet`, `write_csv`), while relying on the `5s` timeout for Cartesian explosion protection.
 - **DuckDB Sandbox Locks (`internal/sandbox/security_profile.py`)**:
-  - `duckdb.connect(":memory:")` with `enable_external_access=false`, `temp_directory=''`, `threads=2`, `memory_limit='2.5GB'`.
+  - `duckdb.connect(":memory:")` binds the single validated `{hash}.parquet` view first, then immediately locks `enable_external_access=false`, `temp_directory=''`, `threads=2`, and per-worker `memory_limit` before executing user SQL.
 - **Secured Logging & Container Hardening**:
   - Structured JSON logs with redaction of credentials, tokens, presigned S3 query params, and PII; non-root container with `jemalloc` preloaded.
 
@@ -78,6 +81,7 @@ Aligned with `Production Grade Backend Concepts.pdf`:
   - `tabular_worker_active_queries` (Gauge — primary KEDA metric)
   - `tabular_worker_query_duration_seconds` (Histogram partitioned by `warm_cache` vs `cold_s3`)
   - `tabular_worker_cache_hit_ratio` (Gauge)
+  - `tabular_worker_cache_hits_total` / `tabular_worker_cache_misses_total` (Counters for multi-pod PromQL aggregation)
   - `tabular_worker_cache_bytes_used` (Gauge)
   - `tabular_worker_subprocess_recycles_total` (Counter partitioned by `TIMEOUT`, `MEMORY_LIMIT`, `TASK_LIMIT`)
   - `tabular_worker_flight_stream_bytes_total` (Counter)

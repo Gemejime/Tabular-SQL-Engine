@@ -3,10 +3,10 @@
 ## Threat Model & Trust Boundaries
 
 - **Untrusted Text-to-SQL Payloads**: Queries arrive from `rag-search-orchestrator` after upstream LLM Text-to-SQL generation (`rag-prompt-registry-service`). Prompt injection or malformed SQL must be treated as hostile and blocked by deterministic `sqlglot` AST whitelisting ($\le 2\text{ ms}$) before reaching DuckDB.
-- **Native Engine Isolation**: DuckDB C++ memory corruption, panics, or runaway cross-joins are isolated inside ephemeral `ProcessPoolExecutor` child processes (`max_tasks_per_child=100`) with a `5s` `SIGKILL` circuit breaker.
-- **Disabled External & Disk Access**: Child DuckDB instances run strictly `:memory:` with `enable_external_access=false` and `temp_directory=''`, preventing arbitrary file reads, network exfiltration, or extension loading.
-- **Tenant Isolation**: Every Flight ticket includes `tenant_id` and `table_hash`. `table_resolver.py` validates tenant ownership/namespace before binding local `{hash}.parquet` descriptors.
-- **S3 Read-Only VPC Access**: Worker pods hold least-privilege IAM permissions (`s3:GetObject` only) routed exclusively through internal VPC S3 endpoints.
+- **Native Engine Isolation**: DuckDB C++ memory corruption, panics, or runaway cross-joins are isolated inside ephemeral child processes (`pebble.ProcessPool` / `multiprocessing` supervisor, `max_tasks=100`) with an isolated per-worker `5s` `SIGKILL` circuit breaker.
+- **Disabled External & Disk Access**: Child DuckDB instances run strictly `:memory:`, bind only the single validated `{hash}.parquet` view, and immediately lock `enable_external_access=false` and `temp_directory=''` before executing user SQL, preventing arbitrary file reads, network exfiltration, or extension loading.
+- **Tenant & S3 Path Isolation**: Every Flight ticket includes `tenant_id`, `table_hash`, `s3_bucket`, and `s3_key`. `table_resolver.py` enforces a `s3_bucket` allowlist and canonical `s3_key == f"artifacts/{tenant_id}/{table_hash}.parquet"` to prevent cross-tenant confused-deputy reads (raising gRPC `PERMISSION_DENIED`).
+- **Service-to-Service Auth & S3 Read-Only VPC Access**: Arrow Flight connections from `rag-search-orchestrator` use mTLS (or signed service tokens) in addition to `NetworkPolicy`, and worker pods hold least-privilege IAM permissions (`s3:GetObject` only) routed exclusively through internal VPC S3 endpoints.
 
 ---
 

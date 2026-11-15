@@ -22,7 +22,7 @@ Build this microservice incrementally following a spec-driven workflow:
 
 1. **Continuous Doc API & OpenAPI Maintenance**: The [`.ai/doc-api.md`](doc-api.md) file and OpenAPI 3.1 specification (`api/openapi/openapi.yaml`) MUST be updated on **every code change or addition**, regardless of how small the modification is, if need be.
 2. **Secured Logging**: All logs emitted by the Flight daemon or worker subprocesses must be structured JSON. Strictly redact presigned S3 URLs (`X-Amz-Signature`), AWS credentials, authorization tokens, bearer headers, and tenant PII/PHI before emission.
-3. **Process-Isolated DuckDB Sandboxing**: Never execute DuckDB queries in the main Flight server process; dispatch to `ProcessPoolExecutor` (`max_tasks_per_child=100`) with `enable_external_access=false`, `temp_directory=''`, `memory_limit='2.5GB'`, and `5s` circuit breaking.
+3. **Process-Isolated DuckDB Sandboxing**: Never execute DuckDB queries in the main Flight server process; dispatch to `pebble.ProcessPool` / `multiprocessing` supervisor (`max_tasks=100`) with `enable_external_access=false` (locked after binding the single validated `{hash}.parquet` view), `temp_directory=''`, aggregate `memory_limit <= 2.5GB`, and isolated per-worker `5s` `SIGKILL` circuit breaking.
 4. **Deterministic SQL AST Whitelisting**: Reject non-whitelisted SQL statements via `sqlglot` within $\le 2\text{ ms}$ prior to subprocess dispatch.
 5. **Git Commit Standards**:
    - **Git Commit Frequency**: Commit code as you build. Every working session or phase must contain **at least two git commits**.

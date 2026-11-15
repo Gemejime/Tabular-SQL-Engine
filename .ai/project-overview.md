@@ -57,9 +57,9 @@ GO SEARCH ORCHESTRATOR (rag-search-orchestrator)
 ## Scope & Exclusions
 
 ### In-Scope
-- **Process-Isolated DuckDB Session Pool**: Lifecycle management of ephemeral child worker processes, binding isolated in-memory instances (`duckdb.connect(":memory:")`) configured with `enable_external_access=false`, `temp_directory=''`, `memory_limit='2.5GB'`, and `threads=2`.
-- **SQL AST Security Validator**: Deterministic pre-execution AST checks via `sqlglot` permitting only `Select` constructs and pre-approved function namespaces.
-- **Tier-1 Artifact Local Storage Cache**: Local caching of content-addressed Parquet artifacts (`{hash}.parquet`) on high-throughput NVMe or tmpfs mounts (`10 GiB`) with LRU eviction, lock-free concurrent readers, and S3 HTTP range-read streaming on cache miss.
+- **Process-Isolated DuckDB Session Pool**: Lifecycle management of ephemeral child worker processes (`pebble.ProcessPool` / `multiprocessing` supervisor, `max_tasks=100`), binding isolated in-memory instances (`duckdb.connect(":memory:")`) locked with `enable_external_access=false`, `temp_directory=''`, aggregate `memory_limit <= 2.5GB` across `POOL_SIZE` workers, and `threads=2`.
+- **SQL AST Security Validator**: Deterministic pre-execution AST checks via `sqlglot` permitting only read-only `Select`, `With` (CTEs), and `Union` constructs and pre-approved function namespaces.
+- **Tier-1 Artifact Local Storage Cache**: Local caching of content-addressed Parquet artifacts (`{hash}.parquet`) on disk-backed `10 GiB` NVMe `emptyDir` mounts with single-flight coalescing, in-memory LRU eviction, lock-free concurrent readers, and S3 HTTP range-read streaming on cache miss.
 - **Arrow Flight IPC Ingress & Egress**: Apache Arrow Flight server daemon accepting tickets, coordinating subprocess dispatch, and streaming chunked Arrow `RecordBatch` instances.
 - **Subprocess Circuit Breaking**: Cancellation monitors that `SIGKILL` and respawn child worker subprocesses exceeding execution deadlines (`5s`).
 - **Operational HTTP & Telemetry Endpoints**: `/healthz`, `/ready`, `/metrics` (Prometheus), `/openapi.yaml`, and `/docs` documented via OpenAPI 3.1.

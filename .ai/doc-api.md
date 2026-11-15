@@ -85,8 +85,13 @@ Exposes Prometheus text exposition metrics (`text/plain; version=0.0.4`).
 ```
 - **Error Mappings**:
   - `INVALID_ARGUMENT` (gRPC): Malformed ticket payload or rejected `sqlglot` AST rule violation (`ValidationError`).
-  - `DEADLINE_EXCEEDED` / `INTERNAL` (gRPC): Query exceeded `5s` circuit breaker or child subprocess terminated (`SIGKILL`).
+  - `PERMISSION_DENIED` (gRPC): Cross-tenant `tenant_id`, unallowlisted `s3_bucket`, or canonical `s3_key` mismatch (`TenantIsolationError`).
+  - `DEADLINE_EXCEEDED` (gRPC): Query exceeded `5s` circuit breaker (`SIGKILL`ed by `circuit_breaker.py`).
+  - `INTERNAL` (gRPC): Unexpected child subprocess crash/OOM/panic (`SIGKILL`ed) or IPC failure.
+  - `RESOURCE_EXHAUSTED` (gRPC): Pod concurrency cap (`MAX_CONCURRENT_QUERIES`) saturated (backpressure).
   - `NOT_FOUND` (gRPC): Target `{hash}.parquet` artifact missing in both local cache and S3.
+- **Tenant & S3 Path Validation**:
+  - `s3_bucket` MUST match the configured allowlist, and `s3_key` MUST match `artifacts/{tenant_id}/{table_hash}.parquet`.
 
 ### `DoAction(context, action)` (`api/flight/actions.py`)
 | Action Type | Request Body (JSON) | Response |
@@ -109,8 +114,10 @@ Exposes Prometheus text exposition metrics (`text/plain; version=0.0.4`).
 | :--- | :--- | :--- | :--- |
 | `tabular_worker_active_queries` | Gauge | — | Concurrent in-flight queries (primary KEDA metric, target `>= 4` per pod) |
 | `tabular_worker_query_duration_seconds` | Histogram | `cache_state` (`warm_cache`, `cold_s3`) | End-to-end query latency distribution |
-| `tabular_worker_cache_hit_ratio` | Gauge | — | Local NVMe/tmpfs Parquet cache hit ratio |
-| `tabular_worker_cache_bytes_used` | Gauge | — | Current local NVMe/tmpfs cache disk utilization |
+| `tabular_worker_cache_hit_ratio` | Gauge | — | Local NVMe Parquet cache hit ratio |
+| `tabular_worker_cache_hits_total` | Counter | — | Total local Parquet cache hits (for multi-pod PromQL aggregation) |
+| `tabular_worker_cache_misses_total` | Counter | — | Total local Parquet cache misses (for multi-pod PromQL aggregation) |
+| `tabular_worker_cache_bytes_used` | Gauge | — | Current local NVMe cache disk utilization |
 | `tabular_worker_subprocess_recycles_total` | Counter | `reason` (`TIMEOUT`, `MEMORY_LIMIT`, `TASK_LIMIT`) | Child worker recycling events |
 | `tabular_worker_flight_stream_bytes_total` | Counter | — | Total zero-copy Arrow Flight bytes streamed |
 | `tabular_worker_ast_rejections_total` | Counter | `rule` | Rejected SQL statements by violated AST rule |
