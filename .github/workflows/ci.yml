@@ -1,0 +1,286 @@
+name: rag-tabular-analytics-worker CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - rag-tabular-analytics-worker
+      - "feat/**"
+      - "fix/**"
+  pull_request:
+    branches:
+      - main
+      - master
+      - rag-tabular-analytics-worker
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  SERVICE_NAME: "rag-tabular-analytics-worker"
+
+jobs:
+  lint-and-typecheck:
+    name: Lint & Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install lint and typecheck tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff==0.11.0 mypy==1.15.0
+          if [ -f pyproject.toml ]; then
+            pip install -e ".[dev]" || pip install -e . || true
+          fi
+
+      - name: Run Ruff lint & format checks
+        run: |
+          set -euo pipefail
+          if [ -d cmd ] || [ -d internal ] || [ -d api ] || [ -d test ]; then
+            ruff check .
+            ruff format --check .
+          else
+            echo "No Python source directories yet; skipping ruff."
+          fi
+
+      - name: Run Mypy static type checking
+        run: |
+          set -euo pipefail
+          TARGETS=()
+          for dir in cmd internal api; do
+            if [ -d "$dir" ]; then
+              TARGETS+=("$dir")
+            fi
+          done
+          if [ ${#TARGETS[@]} -gt 0 ]; then
+            mypy "${TARGETS[@]}"
+          else
+            echo "No Python source directories yet; skipping mypy."
+          fi
+
+  security-and-logging-audit:
+    name: Security & Secured Logging Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install security audit tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit==1.8.3 pip-audit==2.8.0
+
+      - name: Run Bandit SAST scan
+        run: |
+          set -euo pipefail
+          TARGETS=()
+          for dir in cmd internal api; do
+            if [ -d "$dir" ]; then
+              TARGETS+=("$dir")
+            fi
+          done
+          if [ ${#TARGETS[@]} -gt 0 ]; then
+            bandit -r "${TARGETS[@]}" -ll
+          else
+            echo "No Python source directories yet; skipping bandit."
+          fi
+
+      - name: Run dependency vulnerability audit (pip-audit)
+        run: |
+          set -euo pipefail
+          if [ -f pyproject.toml ]; then
+            pip install -e . || true
+            pip-audit
+          elif [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt
+          else
+            echo "No pyproject.toml or requirements.txt yet; skipping pip-audit."
+          fi
+
+      - name: Audit Secured Logging & DuckDB Sandbox Invariants
+        run: |
+          set -euo pipefail
+          SRC_DIRS=()
+          for dir in cmd internal api; do
+            if [ -d "$dir" ]; then
+              SRC_DIRS+=("$dir")
+            fi
+          done
+
+          if [ ${#SRC_DIRS[@]} -eq 0 ]; then
+            echo "No Python source directories yet; skipping source audit."
+            exit 0
+          fi
+
+          # 1. Disallow raw print() in production code (must use structured JSON logger)
+          if grep -rnE '^\s*print\(' "${SRC_DIRS[@]}"; then
+            echo "ERROR: Raw print() detected in production code. Use structured JSON logging."
+            exit 1
+          fi
+
+          # 2. Disallow logging sensitive credential/signature fields
+          if grep -rnE '(logger|logging)\.[a-z]+\(.*(X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|AWS_SECRET_ACCESS_KEY|presigned_url)' "${SRC_DIRS[@]}"; then
+            echo "ERROR: Potential unredacted secret or presigned URL parameter in log statement."
+            exit 1
+          fi
+
+          # 3. Enforce DuckDB sandbox lock (enable_external_access must never be enabled)
+          if grep -rnE 'enable_external_access\s*=\s*(true|True|1)' "${SRC_DIRS[@]}"; then
+            echo "ERROR: DuckDB enable_external_access must remain disabled (false) in sandbox."
+            exit 1
+          fi
+
+          echo "Secured logging and DuckDB sandbox audit passed."
+
+  openapi-and-doc-api-sync:
+    name: OpenAPI 3.1 & Doc API Contract Sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Verify .ai/doc-api.md exists and is populated
+        run: |
+          set -euo pipefail
+          test -s .ai/doc-api.md
+          grep -q "rag-tabular-analytics-worker" .ai/doc-api.md
+          grep -q "OpenAPI 3.1" .ai/doc-api.md
+          grep -q "Arrow Flight" .ai/doc-api.md
+
+      - name: Validate OpenAPI 3.1 Specification
+        run: |
+          set -euo pipefail
+          if [ -f api/openapi/openapi.yaml ]; then
+            pip install --quiet openapi-spec-validator==0.7.1 pyyaml==6.0.2
+            python -c "
+          import yaml
+          from openapi_spec_validator import validate
+          with open('api/openapi/openapi.yaml', 'r', encoding='utf-8') as f:
+              spec = yaml.safe_load(f)
+          assert str(spec.get('openapi', '')).startswith('3.1'), f'Expected OpenAPI 3.1.x, got {spec.get(\"openapi\")}'
+          validate(spec)
+          print('OpenAPI 3.1 specification is valid.')
+          "
+          else
+            echo "api/openapi/openapi.yaml not created yet; skipping OpenAPI validation."
+          fi
+
+      - name: Enforce Doc API & OpenAPI Sync on API/Contract PR Changes
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          if echo "$CHANGED_FILES" | grep -qE '^(api/|internal/flight/|internal/telemetry/|internal/validator/)'; then
+            if ! echo "$CHANGED_FILES" | grep -qE '^(\.ai/doc-api\.md|api/openapi/openapi\.yaml)$'; then
+              echo "ERROR: API, Flight, telemetry, or validator code changed without updating .ai/doc-api.md or api/openapi/openapi.yaml."
+              exit 1
+            fi
+          fi
+          echo "Doc API & OpenAPI contract sync check passed."
+
+  test-suites:
+    name: Test Suites (Unit, Security, Integration, Chaos)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest==8.3.5 pytest-asyncio==0.25.3 pytest-cov==6.0.0
+          if [ -f pyproject.toml ]; then
+            pip install -e ".[test]" || pip install -e . || true
+          fi
+
+      - name: Run Unit Tests (AST Validator, Cache LRU)
+        run: |
+          set -euo pipefail
+          if [ -d test/unit ]; then
+            pytest -v test/unit
+          else
+            echo "No test/unit directory yet; skipping unit tests."
+          fi
+
+      - name: Run Security & AST Fuzzing Tests
+        run: |
+          set -euo pipefail
+          if [ -d test/security ]; then
+            pytest -v test/security
+          else
+            echo "No test/security directory yet; skipping security tests."
+          fi
+
+      - name: Run Integration Tests (Arrow Flight IPC & Mock S3)
+        run: |
+          set -euo pipefail
+          if [ -d test/integration ]; then
+            pytest -v test/integration
+          else
+            echo "No test/integration directory yet; skipping integration tests."
+          fi
+
+      - name: Run Chaos & Subprocess Isolation Tests (SIGKILL, 5s Timeout)
+        run: |
+          set -euo pipefail
+          if [ -d test/chaos ]; then
+            pytest -v test/chaos
+          else
+            echo "No test/chaos directory yet; skipping chaos tests."
+          fi
+
+  container-and-helm-lint:
+    name: Container & Helm Manifest Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lint Dockerfile (Hadolint)
+        if: hashFiles('deployments/docker/Dockerfile') != ''
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: deployments/docker/Dockerfile
+
+      - name: Lint & Render Helm Chart
+        if: hashFiles('deployments/helm/Chart.yaml') != ''
+        run: |
+          set -euo pipefail
+          helm lint deployments/helm
+          helm template rag-tabular-analytics-worker deployments/helm > /dev/null
+          echo "Helm lint and template rendering passed."
