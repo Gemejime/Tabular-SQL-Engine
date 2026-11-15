@@ -53,7 +53,7 @@ For every implementation request:
 
 1. **Read Specifications**: Review relevant context files in `.ai/` and blueprints in `tasks/`.
 2. **Inspect Existing Code**: Check `cmd/`, `api/`, `internal/`, `deployments/`, and `test/`.
-3. **Plan First**: Propose an implementation plan or prompt detailing goals, files to modify, security, and verification steps.
+3. **Plan First**: Propose an implementation plan or prompt in `prompts/<task-name>.md` detailing goals, files to modify, security, and verification steps.
 4. **Obtain Approval**: Ask the user for confirmation before writing substantial code.
 5. **Implement with Precision**:
    - Write clean, typed Python 3.12+ code.

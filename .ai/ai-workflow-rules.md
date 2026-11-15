@@ -11,7 +11,7 @@ Build this microservice incrementally following a spec-driven workflow:
 
 ## Human-in-the-Loop Rules
 
-- **Plan First**: Propose an implementation plan before making substantial code changes, and await human confirmation when scope or contracts are non-trivial.
+- **Plan First**: Propose an implementation plan or prompt in `prompts/<task-name>.md` before making substantial code changes, and await human confirmation when scope or contracts are non-trivial.
 - **Ambiguity Escalation**: If S3 bucket/endpoint policies, Flight ticket auth claims, `sqlglot` function allowlists, or KEDA thresholds are ambiguous, prompt for clarification before proceeding.
 - **Destructive Action Guards**: Always request human confirmation before running destructive operations, deleting cached artifacts, or breaking published Flight/OpenAPI contracts.
 - **Demonstrate & Verify**: Provide clear verification steps, `pytest` output, linting/typechecking results, and security audit checks after completing any unit.
