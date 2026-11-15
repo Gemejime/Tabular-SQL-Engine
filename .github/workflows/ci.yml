@@ -61,7 +61,7 @@ jobs:
           set -euo pipefail
           TARGETS=()
           for dir in cmd internal api; do
-            if [ -d "$dir" ]; then
+            if [ -d "$dir" ] && [ -n "$(find "$dir" -type f \( -name '*.py' -o -name '*.pyi' \) -print -quit)" ]; then
               TARGETS+=("$dir")
             fi
           done
@@ -93,7 +93,7 @@ jobs:
           set -euo pipefail
           TARGETS=()
           for dir in cmd internal api; do
-            if [ -d "$dir" ]; then
+            if [ -d "$dir" ] && [ -n "$(find "$dir" -type f \( -name '*.py' -o -name '*.pyi' \) -print -quit)" ]; then
               TARGETS+=("$dir")
             fi
           done
@@ -107,7 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f pyproject.toml ]; then
-            pip install -e . || true
+            pip install -e .
             pip-audit
           elif [ -f requirements.txt ]; then
             pip-audit -r requirements.txt
@@ -196,7 +196,8 @@ jobs:
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          CHANGED_FILES=$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")
           echo "Changed files:"
           echo "$CHANGED_FILES"
 
