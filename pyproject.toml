@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-tabular-analytics-worker"
+version = "0.1.0"
+description = "Stateless, horizontally autoscaling Apache Arrow Flight microservice executing sandboxed DuckDB analytical queries over Parquet artifacts."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "duckdb>=1.2.0",
+    "pebble>=5.1.0",
+    "pyarrow>=18.0.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "sqlglot>=26.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "bandit>=1.8.0",
+    "mypy>=1.15.0",
+    "pip-audit>=2.8.0",
+    "ruff>=0.11.0",
+]
+test = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "pytest-cov>=6.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["cmd*", "internal*", "api*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "S",
+]
+ignore = [
+    "S101",  # Allow assert in tests (handled per-file below too)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"test/**/*.py" = ["S101", "S105", "S106", "S108", "S608"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = [
+    "duckdb",
+    "duckdb.*",
+    "pebble",
+    "pebble.*",
+    "pyarrow",
+    "pyarrow.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+asyncio_mode = "auto"
+addopts = "-ra"
