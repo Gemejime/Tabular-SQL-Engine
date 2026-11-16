@@ -10,11 +10,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
+    "aiobotocore>=2.15.0",
     "duckdb>=1.2.0",
     "pebble>=5.1.0",
     "pyarrow>=18.0.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
+    "pyyaml>=6.0.2",
     "sqlglot>=26.0.0",
 ]
 
@@ -22,10 +24,12 @@ dependencies = [
 dev = [
     "bandit>=1.8.0",
     "mypy>=1.15.0",
+    "openapi-spec-validator>=0.7.1",
     "pip-audit>=2.8.0",
     "ruff>=0.11.0",
 ]
 test = [
+    "openapi-spec-validator>=0.7.1",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.25.0",
     "pytest-cov>=6.0.0",
@@ -68,12 +72,18 @@ no_implicit_optional = true
 
 [[tool.mypy.overrides]]
 module = [
+    "aiobotocore",
+    "aiobotocore.*",
+    "botocore",
+    "botocore.*",
     "duckdb",
     "duckdb.*",
     "pebble",
     "pebble.*",
     "pyarrow",
     "pyarrow.*",
+    "prometheus_client",
+    "prometheus_client.*",
 ]
 ignore_missing_imports = true
 

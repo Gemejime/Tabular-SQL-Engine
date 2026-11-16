@@ -1,0 +1,135 @@
+openapi: 3.1.0
+info:
+  title: rag-tabular-analytics-worker Ops & Control API
+  version: 0.2.0
+  description: >
+    Operational, health, Prometheus observability, and OpenAPI 3.1 documentation
+    endpoints for the stateless Apache Arrow Flight + DuckDB analytics worker.
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:8080
+    description: Internal Service / Kubernetes Pod Ops Listener
+paths:
+  /healthz:
+    get:
+      summary: Kubernetes Liveness Probe
+      description: Verifies the Python host daemon process and async event loop are alive.
+      operationId: getHealthz
+      responses:
+        "200":
+          description: Daemon is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthzResponse"
+  /ready:
+    get:
+      summary: Kubernetes Readiness Probe
+      description: >
+        Verifies the ProcessManager worker pool is healthy, the Tier-1 NVMe/tmpfs
+        cache mount is writable, and the pod is not draining.
+      operationId: getReady
+      responses:
+        "200":
+          description: Pod is ready to serve Arrow Flight queries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+        "503":
+          description: Pod is draining or dependency checks failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotReadyResponse"
+  /metrics:
+    get:
+      summary: Prometheus Metrics Scrape Endpoint
+      description: Exposes Prometheus text exposition metrics (text/plain; version=0.0.4).
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Prometheus metrics payload
+          content:
+            text/plain:
+              schema:
+                type: string
+  /openapi.yaml:
+    get:
+      summary: Raw OpenAPI 3.1 Specification
+      description: Serves the authoritative OpenAPI 3.1 YAML specification.
+      operationId: getOpenApiSpec
+      responses:
+        "200":
+          description: OpenAPI 3.1 YAML document
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /docs:
+    get:
+      summary: Swagger UI Documentation
+      description: Interactive Swagger UI HTML page backed by /openapi.yaml.
+      operationId: getSwaggerDocs
+      responses:
+        "200":
+          description: Swagger UI HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+components:
+  schemas:
+    HealthzResponse:
+      type: object
+      required:
+        - status
+        - service
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+        service:
+          type: string
+          example: rag-tabular-analytics-worker
+    ReadyResponse:
+      type: object
+      required:
+        - status
+        - checks
+      properties:
+        status:
+          type: string
+          enum:
+            - ready
+        checks:
+          type: object
+          required:
+            - process_pool
+            - cache_mount
+          properties:
+            process_pool:
+              type: string
+              enum:
+                - healthy
+            cache_mount:
+              type: string
+              enum:
+                - writable
+    NotReadyResponse:
+      type: object
+      required:
+        - status
+        - checks
+      properties:
+        status:
+          type: string
+          enum:
+            - draining
+            - not_ready
+        checks:
+          type: object
+          additionalProperties:
+            type: string
