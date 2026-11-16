@@ -134,6 +134,22 @@ def test_flight_do_get_do_action_and_ops_endpoints(
     assert table.num_rows == 4
     assert fake_s3.get_calls == 1  # Still 1: served from warm NVMe cache
 
+    # 3b. DoGet empty result must preserve typed schema columns
+    empty_ticket = json.dumps(
+        {
+            "request_id": "req_01_empty",
+            "tenant_id": "tenant-corp-01",
+            "sql": "SELECT id, region, revenue FROM tbl WHERE 1 = 0",
+            "table_alias": "tbl",
+            "table_hash": table_hash,
+            "s3_bucket": "rag-tabular-artifacts",
+            "s3_key": s3_key,
+        }
+    ).encode("utf-8")
+    empty_table = client.do_get(fl.Ticket(empty_ticket)).read_all()
+    assert empty_table.num_rows == 0
+    assert empty_table.schema.names == ["id", "region", "revenue"]
+
     # 4. Error mapping checks: AST rejection, cross-tenant isolation, missing S3 object
     bad_sql_ticket = json.dumps(
         {

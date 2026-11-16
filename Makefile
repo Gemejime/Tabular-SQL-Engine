@@ -10,10 +10,10 @@ lint:
 	$(PYTHON) -m ruff format --check .
 
 typecheck:
-	$(PYTHON) -m mypy internal
+	$(PYTHON) -m mypy cmd internal api
 
 security:
-	$(PYTHON) -m bandit -r internal -ll
+	$(PYTHON) -m bandit -r cmd internal api -ll
 	$(PYTHON) -m pip_audit
 
 test-unit:
@@ -26,6 +26,6 @@ test-chaos:
 	$(PYTHON) -m pytest -v test/chaos
 
 test:
-	$(PYTHON) -m pytest -v test/unit test/security test/chaos
+	$(PYTHON) -m pytest -v test/unit test/security test/chaos test/integration
 
 check: lint typecheck security test

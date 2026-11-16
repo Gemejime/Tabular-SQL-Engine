@@ -8,6 +8,15 @@ from pydantic import ValidationError
 from internal.config.settings import DEFAULT_DUCKDB_TOTAL_MEMORY_BYTES, MIB_BYTES, Settings
 
 
+@pytest.fixture(autouse=True)
+def _clear_tabular_worker_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    for key in list(os.environ):
+        if key.startswith("TABULAR_WORKER_"):
+            monkeypatch.delenv(key, raising=False)
+
+
 def test_default_memory_budget_per_worker() -> None:
     settings = Settings()
     assert settings.POOL_SIZE == 4

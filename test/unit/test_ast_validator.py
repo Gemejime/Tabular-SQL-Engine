@@ -10,6 +10,7 @@ from internal.validator import (
     ASTSyntaxError,
     ASTValidator,
     DisallowedAliasError,
+    DisallowedStatementError,
     DisallowedTableReferenceError,
     JoinLimitExceededError,
     QueryLengthExceededError,
@@ -130,3 +131,34 @@ def test_warm_steady_state_validation_latency(validator: ASTValidator) -> None:
     avg_ms = ((time.perf_counter() - start) / iterations) * 1000.0
     # Pure-Python sqlglot.parse takes ~2-4 ms on shared CI runners; guard against regressions.
     assert avg_ms <= 15.0, f"Expected warm AST validation <= 15.0 ms, got {avg_ms:.3f} ms"
+
+
+def test_rejects_unterminated_sql_string_with_syntax_error(validator: ASTValidator) -> None:
+    with pytest.raises(ASTSyntaxError):
+        validator.validate("SELECT 'unterminated", allowed_table_alias="tbl")
+
+
+def test_enforces_lexical_cte_scope(validator: ASTValidator) -> None:
+    nested_leak_sql = (
+        "SELECT * FROM (WITH inner_cte AS (SELECT region FROM tbl) SELECT * FROM inner_cte) sub "
+        "UNION ALL SELECT * FROM inner_cte"
+    )
+    with pytest.raises(DisallowedTableReferenceError):
+        validator.validate(nested_leak_sql, allowed_table_alias="tbl")
+
+
+def test_allows_date_diff_with_approved_unit_and_rejects_unrelated_var(
+    validator: ASTValidator,
+) -> None:
+    assert (
+        validator.validate(
+            "SELECT DATE_DIFF('day', start_dt, end_dt) FROM tbl",
+            allowed_table_alias="tbl",
+        )
+        is not None
+    )
+    with pytest.raises(DisallowedStatementError):
+        validator.validate(
+            "SELECT DATE_DIFF('bogus_unit', start_dt, end_dt) FROM tbl",
+            allowed_table_alias="tbl",
+        )

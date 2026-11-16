@@ -30,8 +30,8 @@ pip install -e ".[dev,test]"
 ```bash
 ruff check .
 ruff format --check .
-mypy internal
-bandit -r internal -ll
+mypy cmd internal api
+bandit -r cmd internal api -ll
 pip-audit
-pytest -v test/unit test/security test/chaos
+pytest -v test/unit test/security test/chaos test/integration
 ```
