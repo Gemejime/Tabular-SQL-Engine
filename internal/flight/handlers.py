@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import Future
 
 import pyarrow as pa
 import pyarrow.flight as fl
@@ -20,16 +21,108 @@ from api.flight.schema import (
 )
 from internal.config.settings import Settings
 from internal.pool.circuit_breaker import QueryTimeoutError, RecycleReason, WorkerCrashError
-from internal.pool.process_manager import ProcessManager
+from internal.pool.process_manager import ProcessManager, QueryStream
 from internal.storage.cache_manager import CacheManager, PinnedArtifact
 from internal.storage.s3_streamer import S3Streamer
-from internal.storage.table_resolver import TableResolver
+from internal.storage.table_resolver import ResolvedTable, TableResolver
 from internal.telemetry.logging import get_logger
 from internal.telemetry.metrics import MetricsRegistry
 from internal.validator.ast_validator import ASTValidator
 from internal.validator.exceptions import ValidationError as SQLValidationError
 
 _logger = get_logger("internal.flight.handlers")
+
+
+class _OwnedFlightBatchIterator:
+    """Iterator owning Flight query stream cleanup across iteration, close, and GC."""
+
+    def __init__(
+        self,
+        *,
+        query_stream: QueryStream,
+        pinned: PinnedArtifact,
+        metrics: MetricsRegistry,
+        semaphore: threading.BoundedSemaphore,
+        start_time: float,
+        request_id: str,
+        tenant_id: str,
+        table_hash: str,
+    ) -> None:
+        self._query_stream = query_stream
+        self._batch_iter = iter(query_stream)
+        self._pinned = pinned
+        self._metrics = metrics
+        self._semaphore = semaphore
+        self._start_time = start_time
+        self._request_id = request_id
+        self._tenant_id = tenant_id
+        self._table_hash = table_hash
+        self._stream_status = "ok"
+        self._stream_bytes = 0
+        self._cleanup_lock = threading.Lock()
+        self._cleaned_up = False
+
+    def __iter__(self) -> Iterator[pa.RecordBatch]:
+        return self
+
+    def __next__(self) -> pa.RecordBatch:
+        try:
+            batch = next(self._batch_iter)
+        except StopIteration:
+            self._cleanup()
+            raise
+        except QueryTimeoutError as exc:
+            self._stream_status = "timeout"
+            self._metrics.inc_subprocess_recycle(RecycleReason.TIMEOUT.value)
+            self._cleanup()
+            raise map_exception_to_flight_error(exc) from exc
+        except WorkerCrashError as exc:
+            self._stream_status = "worker_crash"
+            self._metrics.inc_subprocess_recycle(RecycleReason.CRASH.value)
+            self._cleanup()
+            raise map_exception_to_flight_error(exc) from exc
+        except Exception as exc:
+            self._stream_status = "error"
+            self._cleanup()
+            raise map_exception_to_flight_error(exc) from exc
+
+        self._stream_bytes += batch.nbytes
+        self._metrics.add_stream_bytes(batch.nbytes)
+        return batch
+
+    def close(self) -> None:
+        """Close underlying stream and release owned resources idempotently."""
+        if not self._cleaned_up and self._stream_status == "ok":
+            self._stream_status = "closed"
+        self._cleanup()
+
+    def __del__(self) -> None:
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        with self._cleanup_lock:
+            if self._cleaned_up:
+                return
+            self._cleaned_up = True
+
+        self._query_stream.close()
+        duration_s = time.perf_counter() - self._start_time
+        self._metrics.observe_query_duration(self._pinned.cache_state, duration_s)
+        self._metrics.dec_active_queries()
+        self._pinned.release()
+        self._semaphore.release()
+        _logger.info(
+            "Completed Flight DoGet query stream",
+            extra={
+                "request_id": self._request_id,
+                "tenant_id": self._tenant_id,
+                "table_hash": self._table_hash,
+                "cache_state": self._pinned.cache_state,
+                "duration_ms": round(duration_s * 1000.0, 2),
+                "status": self._stream_status,
+                "extra_fields": {"stream_bytes": self._stream_bytes},
+            },
+        )
 
 
 class FlightHandlers:
@@ -57,6 +150,48 @@ class FlightHandlers:
         self._metrics = metrics
         self._concurrency_semaphore = threading.BoundedSemaphore(settings.MAX_CONCURRENT_QUERIES)
 
+    def set_hydration_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Update the asyncio event loop used for S3 hydration."""
+        self._hydration_loop = loop
+
+    def _await_hydration(self, resolved: ResolvedTable) -> PinnedArtifact:
+        """Await hydration on the asyncio loop, releasing any artifact if the caller abandons."""
+        future: Future[PinnedArtifact] = asyncio.run_coroutine_threadsafe(
+            self._cache_manager.get_or_hydrate(resolved, self._s3_streamer),
+            self._hydration_loop,
+        )
+        lock = threading.Lock()
+        caller_took_ownership = False
+        caller_abandoned = False
+        released = False
+
+        def _release_once(done_fut: Future[PinnedArtifact]) -> None:
+            nonlocal released
+            if done_fut.cancelled():
+                return
+            try:
+                artifact = done_fut.result()
+            except BaseException:
+                return
+            with lock:
+                if caller_took_ownership or not caller_abandoned or released:
+                    return
+                released = True
+            artifact.release()
+
+        future.add_done_callback(_release_once)
+        try:
+            artifact = future.result(timeout=self._settings.S3_TIMEOUT_SECONDS + 2.0)
+            with lock:
+                caller_took_ownership = True
+            return artifact
+        except BaseException:
+            with lock:
+                caller_abandoned = True
+            if future.done():
+                _release_once(future)
+            raise
+
     def _hydrate_sync(
         self,
         tenant_id: str,
@@ -71,11 +206,7 @@ class FlightHandlers:
             s3_bucket=s3_bucket,
             s3_key=s3_key,
         )
-        future = asyncio.run_coroutine_threadsafe(
-            self._cache_manager.get_or_hydrate(resolved, self._s3_streamer),
-            self._hydration_loop,
-        )
-        return future.result(timeout=self._settings.S3_TIMEOUT_SECONDS + 2.0)
+        return self._await_hydration(resolved)
 
     def handle_do_get(self, ticket_bytes: bytes) -> fl.FlightDataStream:
         """Validate ticket and SQL AST, hydrate Parquet, and stream RecordBatch chunks."""
@@ -134,70 +265,28 @@ class FlightHandlers:
         handed_off = False
 
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._cache_manager.get_or_hydrate(resolved, self._s3_streamer),
-                self._hydration_loop,
-            )
-            pinned = future.result(timeout=self._settings.S3_TIMEOUT_SECONDS + 2.0)
-
             self._metrics.inc_active_queries()
             active_incremented = True
 
-            batch_iter = iter(
-                self._process_manager.stream_query(
-                    ticket.sql,
-                    pinned.path,
-                    ticket.table_alias,
-                )
+            pinned = self._await_hydration(resolved)
+
+            query_stream = self._process_manager.stream_query(
+                ticket.sql,
+                pinned.path,
+                ticket.table_alias,
             )
-            first_batch = next(batch_iter, None)
-            schema = first_batch.schema if first_batch is not None else pa.schema([])
-
-            def _stream_batches() -> Iterator[pa.RecordBatch]:
-                assert pinned is not None  # noqa: S101
-                stream_status = "ok"
-                stream_bytes = 0
-                try:
-                    if first_batch is not None:
-                        stream_bytes += first_batch.nbytes
-                        self._metrics.add_stream_bytes(first_batch.nbytes)
-                        yield first_batch
-                    for batch in batch_iter:
-                        stream_bytes += batch.nbytes
-                        self._metrics.add_stream_bytes(batch.nbytes)
-                        yield batch
-                except QueryTimeoutError as exc:
-                    stream_status = "timeout"
-                    self._metrics.inc_subprocess_recycle(RecycleReason.TIMEOUT.value)
-                    raise map_exception_to_flight_error(exc) from exc
-                except WorkerCrashError as exc:
-                    stream_status = "worker_crash"
-                    self._metrics.inc_subprocess_recycle(RecycleReason.CRASH.value)
-                    raise map_exception_to_flight_error(exc) from exc
-                except Exception as exc:
-                    stream_status = "error"
-                    raise map_exception_to_flight_error(exc) from exc
-                finally:
-                    duration_s = time.perf_counter() - start_time
-                    self._metrics.observe_query_duration(pinned.cache_state, duration_s)
-                    self._metrics.dec_active_queries()
-                    pinned.release()
-                    self._concurrency_semaphore.release()
-                    _logger.info(
-                        "Completed Flight DoGet query stream",
-                        extra={
-                            "request_id": ticket.request_id,
-                            "tenant_id": ticket.tenant_id,
-                            "table_hash": ticket.table_hash,
-                            "cache_state": pinned.cache_state,
-                            "duration_ms": round(duration_s * 1000.0, 2),
-                            "status": stream_status,
-                            "extra_fields": {"stream_bytes": stream_bytes},
-                        },
-                    )
-
+            owned_iter = _OwnedFlightBatchIterator(
+                query_stream=query_stream,
+                pinned=pinned,
+                metrics=self._metrics,
+                semaphore=self._concurrency_semaphore,
+                start_time=start_time,
+                request_id=ticket.request_id,
+                tenant_id=ticket.tenant_id,
+                table_hash=ticket.table_hash,
+            )
             handed_off = True
-            return fl.GeneratorStream(schema, _stream_batches())
+            return fl.GeneratorStream(query_stream.schema, owned_iter)
         except QueryTimeoutError as exc:
             self._metrics.inc_subprocess_recycle(RecycleReason.TIMEOUT.value)
             raise map_exception_to_flight_error(exc) from exc

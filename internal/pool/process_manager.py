@@ -7,7 +7,7 @@ import io
 import os
 from collections.abc import Iterator
 from concurrent.futures import Future
-from multiprocessing.connection import Listener
+from multiprocessing.connection import Client, Listener
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -15,7 +15,12 @@ import pyarrow as pa
 from pebble import ProcessPool
 
 from internal.config.settings import Settings
-from internal.pool.circuit_breaker import CircuitBreaker, QueryTimeoutError, WorkerCrashError
+from internal.pool.circuit_breaker import (
+    CircuitBreaker,
+    QueryTimeoutError,
+    RecycleReason,
+    WorkerCrashError,
+)
 from internal.pool.worker_task import run_sandboxed_query_task
 from internal.telemetry.logging import get_logger
 
@@ -60,6 +65,58 @@ class _ConnectionRawReader(io.RawIOBase):
         b[:n] = self._buffer[:n]
         del self._buffer[:n]
         return n
+
+
+class QueryStream:
+    """Iterable Arrow RecordBatch stream carrying the IPC schema and owning IPC cleanup."""
+
+    def __init__(
+        self,
+        *,
+        schema: pa.Schema,
+        stream_reader: pa.ipc.RecordBatchStreamReader,
+        conn: _IpcRecvConn,
+        listener: Listener,
+        future: Future[int],
+        circuit_breaker: CircuitBreaker,
+    ) -> None:
+        self.schema = schema
+        self._stream_reader = stream_reader
+        self._conn = conn
+        self._listener = listener
+        self._future = future
+        self._circuit_breaker = circuit_breaker
+        self._closed = False
+        self._iterated = False
+
+    def close(self) -> None:
+        """Close the Arrow stream reader, IPC connection, and listener idempotently."""
+        if self._closed:
+            return
+        self._closed = True
+        with contextlib.suppress(Exception):
+            self._stream_reader.close()
+        with contextlib.suppress(OSError):
+            self._conn.close()
+        with contextlib.suppress(OSError):
+            self._listener.close()
+
+    def __del__(self) -> None:
+        self.close()
+
+    def __iter__(self) -> Iterator[pa.RecordBatch]:
+        if self._iterated:
+            raise RuntimeError("QueryStream can only be iterated once.")
+        self._iterated = True
+        try:
+            try:
+                yield from self._stream_reader
+            except (EOFError, OSError, pa.ArrowInvalid) as exc:
+                self._circuit_breaker.await_result(self._future)
+                raise WorkerCrashError(f"Arrow IPC stream interrupted: {exc}") from exc
+            self._circuit_breaker.await_result(self._future)
+        finally:
+            self.close()
 
 
 class ProcessManager:
@@ -116,10 +173,12 @@ class ProcessManager:
         sql: str,
         parquet_path: Path,
         table_alias: str,
-    ) -> Iterator[pa.RecordBatch]:
-        """Dispatch a validated SQL query to a worker and yield Arrow RecordBatch chunks."""
+    ) -> QueryStream:
+        """Dispatch a validated SQL query to a worker and return a schema-aware batch stream."""
         if self._pool is None:
             raise RuntimeError("ProcessManager must be started before executing queries.")
+
+        import threading
 
         authkey = os.urandom(32)
         listener = Listener(authkey=authkey)
@@ -140,36 +199,99 @@ class ProcessManager:
             timeout=self._settings.QUERY_TIMEOUT_SECONDS,
         )
 
-        # Close the listener if the worker fails before connecting so accept() unblocks.
-        def _unblock_listener(_done_future: Future[int]) -> None:
-            if _done_future.exception() is not None:
-                with contextlib.suppress(OSError):
-                    listener.close()
+        accept_done = threading.Event()
+        aborted = threading.Event()
+        accepted_conn: list[_IpcRecvConn | None] = [None]
+        accept_error: list[BaseException | None] = [None]
 
-        future.add_done_callback(_unblock_listener)
-
-        try:
+        def _accept_worker() -> None:
             try:
-                conn = listener.accept()
-            except OSError as exc:
+                incoming = listener.accept()
+                if aborted.is_set():
+                    with contextlib.suppress(OSError):
+                        incoming.close()
+                    return
+                accepted_conn[0] = incoming
+            except BaseException as exc:
+                accept_error[0] = exc
+            finally:
+                accept_done.set()
+
+        accept_thread = threading.Thread(
+            target=_accept_worker,
+            name="ipc-listener-accept",
+            daemon=True,
+        )
+        accept_thread.start()
+
+        def _wake_listener() -> None:
+            aborted.set()
+            with contextlib.suppress(OSError, EOFError, Exception):
+                wake_conn = Client(listener.address, authkey=authkey)
+                wake_conn.close()
+            with contextlib.suppress(OSError):
+                listener.close()
+
+        def _on_future_done(_done_future: Future[int]) -> None:
+            if not accept_done.is_set() and (
+                _done_future.cancelled() or _done_future.exception() is not None
+            ):
+                _wake_listener()
+
+        future.add_done_callback(_on_future_done)
+
+        handed_off = False
+        try:
+            if not accept_done.wait(timeout=self._settings.QUERY_TIMEOUT_SECONDS):
+                _wake_listener()
+                accept_thread.join(timeout=1.0)
+                try:
+                    self._circuit_breaker.await_result(future)
+                except QueryTimeoutError:
+                    raise
+                except (OSError, EOFError, WorkerCrashError) as exc:
+                    self._circuit_breaker.record_recycle(RecycleReason.TIMEOUT)
+                    raise QueryTimeoutError(
+                        "Worker failed to connect within "
+                        f"{self._settings.QUERY_TIMEOUT_SECONDS:.1f}s."
+                    ) from exc
+                self._circuit_breaker.record_recycle(RecycleReason.TIMEOUT)
+                raise QueryTimeoutError(
+                    f"Worker failed to connect within {self._settings.QUERY_TIMEOUT_SECONDS:.1f}s."
+                )
+
+            if accept_error[0] is not None:
                 self._circuit_breaker.await_result(future)
-                raise WorkerCrashError(f"IPC accept failed: {exc}") from exc
+                raise WorkerCrashError(f"IPC accept failed: {accept_error[0]}") from accept_error[0]
+
+            conn = accepted_conn[0]
+            if conn is None:
+                self._circuit_breaker.await_result(future)
+                raise WorkerCrashError("IPC accept aborted before worker connected.")
 
             raw_reader = _ConnectionRawReader(conn)
             buffered_reader = io.BufferedReader(raw_reader)
             try:
-                with pa.ipc.open_stream(buffered_reader) as stream_reader:
-                    yield from stream_reader
+                stream_reader = pa.ipc.open_stream(buffered_reader)
             except (EOFError, OSError, pa.ArrowInvalid) as exc:
-                # Re-check future first so timeouts/crashes surface as canonical errors.
                 self._circuit_breaker.await_result(future)
                 raise WorkerCrashError(f"Arrow IPC stream interrupted: {exc}") from exc
 
-            self._circuit_breaker.await_result(future)
+            handed_off = True
+            return QueryStream(
+                schema=stream_reader.schema,
+                stream_reader=stream_reader,
+                conn=conn,
+                listener=listener,
+                future=future,
+                circuit_breaker=self._circuit_breaker,
+            )
         except (QueryTimeoutError, WorkerCrashError):
             raise
         finally:
-            if conn is not None:
-                conn.close()
-            with contextlib.suppress(OSError):
-                listener.close()
+            if not handed_off:
+                if conn is not None:
+                    with contextlib.suppress(OSError):
+                        conn.close()
+                with contextlib.suppress(OSError):
+                    listener.close()

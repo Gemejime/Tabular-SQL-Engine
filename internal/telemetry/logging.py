@@ -58,25 +58,25 @@ def redact_text(value: str) -> str:
     return sanitized
 
 
+def _redact_value(val: Any) -> Any:
+    """Recursively sanitize nested mappings, sequences, and strings."""
+    if isinstance(val, dict):
+        return redact_mapping(val)
+    if isinstance(val, str):
+        return redact_text(val)
+    if isinstance(val, list | tuple):
+        return [_redact_value(item) for item in val]
+    return val
+
+
 def redact_mapping(data: dict[str, Any]) -> dict[str, Any]:
     """Recursively redact sensitive keys and string values in a structured log mapping."""
     result: dict[str, Any] = {}
     for key, val in data.items():
         if key.lower() in _SENSITIVE_KEYS:
             result[key] = REDACTED
-        elif isinstance(val, dict):
-            result[key] = redact_mapping(val)
-        elif isinstance(val, str):
-            result[key] = redact_text(val)
-        elif isinstance(val, (list, tuple)):
-            result[key] = [
-                redact_mapping(item)
-                if isinstance(item, dict)
-                else (redact_text(item) if isinstance(item, str) else item)
-                for item in val
-            ]
         else:
-            result[key] = val
+            result[key] = _redact_value(val)
     return result
 
 
@@ -99,9 +99,7 @@ class JsonLogFormatter(logging.Formatter):
         for field_name in _CORRELATION_FIELDS:
             field_val = getattr(record, field_name, None)
             if field_val is not None:
-                payload[field_name] = (
-                    redact_text(field_val) if isinstance(field_val, str) else field_val
-                )
+                payload[field_name] = _redact_value(field_val)
 
         extra_fields = getattr(record, "extra_fields", None)
         if isinstance(extra_fields, dict):

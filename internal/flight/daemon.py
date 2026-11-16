@@ -48,6 +48,16 @@ class HydrationLoopThread:
 
     def start(self) -> None:
         """Start the background asyncio thread and wait until the loop is running."""
+        if self._thread.is_alive():
+            return
+        if self._loop.is_closed():
+            self._loop = asyncio.new_event_loop()
+            self._ready = threading.Event()
+            self._thread = threading.Thread(
+                target=self._run,
+                name="s3-hydration-loop",
+                daemon=True,
+            )
         self._thread.start()
         self._ready.wait(timeout=5.0)
 
@@ -55,7 +65,8 @@ class HydrationLoopThread:
         """Stop the asyncio event loop and join its thread."""
         if self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=5.0)
+        if self._thread.is_alive():
+            self._thread.join(timeout=5.0)
 
 
 class WorkerDaemon:
@@ -108,48 +119,59 @@ class WorkerDaemon:
         self.ops_server: OpsHTTPServer | None = None
         self._stop_event = threading.Event()
         self._flight_thread: threading.Thread | None = None
+        self._is_shut_down = False
 
     def start(self) -> None:
         """Start hydration loop, S3 client, cache, worker pool, Flight server, and Ops HTTP."""
-        self.hydration_thread.start()
-        asyncio.run_coroutine_threadsafe(
-            self.s3_streamer.start(),
-            self.hydration_thread.loop,
-        ).result(timeout=5.0)
+        self._is_shut_down = False
+        self._stop_event.clear()
+        self.ops_state.clear_draining()
 
-        self.cache_manager.initialize()
-        self.process_manager.start()
+        try:
+            self.hydration_thread.start()
+            self.handlers.set_hydration_loop(self.hydration_thread.loop)
+            asyncio.run_coroutine_threadsafe(
+                self.s3_streamer.start(),
+                self.hydration_thread.loop,
+            ).result(timeout=5.0)
 
-        location = f"grpc://{self.settings.FLIGHT_HOST}:{self.settings.FLIGHT_PORT}"
-        self.flight_server = TabularFlightServer(location, self.handlers)
-        self._flight_thread = threading.Thread(
-            target=self.flight_server.serve,
-            name="arrow-flight-server",
-            daemon=True,
-        )
-        self._flight_thread.start()
+            self.cache_manager.initialize()
+            self.process_manager.start()
 
-        self.ops_server = OpsHTTPServer(
-            self.settings.HTTP_HOST,
-            self.settings.HTTP_PORT,
-            self.ops_state,
-        )
-        self.ops_server.start()
+            location = f"grpc://{self.settings.FLIGHT_HOST}:{self.settings.FLIGHT_PORT}"
+            self.flight_server = TabularFlightServer(location, self.handlers)
+            self._flight_thread = threading.Thread(
+                target=self.flight_server.serve,
+                name="arrow-flight-server",
+                daemon=True,
+            )
+            self._flight_thread.start()
 
-        _logger.info(
-            "Started rag-tabular-analytics-worker daemon",
-            extra={
-                "extra_fields": {
-                    "flight_port": self.flight_server.port,
-                    "http_port": self.ops_server.port,
-                }
-            },
-        )
+            self.ops_server = OpsHTTPServer(
+                self.settings.HTTP_HOST,
+                self.settings.HTTP_PORT,
+                self.ops_state,
+            )
+            self.ops_server.start()
+
+            _logger.info(
+                "Started rag-tabular-analytics-worker daemon",
+                extra={
+                    "extra_fields": {
+                        "flight_port": self.flight_server.port,
+                        "http_port": self.ops_server.port,
+                    }
+                },
+            )
+        except BaseException:
+            self.shutdown()
+            raise
 
     def shutdown(self) -> None:
         """Gracefully drain readiness, shut down Flight server, pool, S3 client, and loop."""
-        if self._stop_event.is_set():
+        if self._is_shut_down:
             return
+        self._is_shut_down = True
         self._stop_event.set()
         self.ops_state.mark_draining()
 
@@ -158,13 +180,17 @@ class WorkerDaemon:
         if self.flight_server is not None:
             self.flight_server.shutdown()
             self.flight_server.wait()
+            self.flight_server = None
         if self._flight_thread is not None:
-            self._flight_thread.join(timeout=5.0)
+            if self._flight_thread.is_alive():
+                self._flight_thread.join(timeout=5.0)
+            self._flight_thread = None
 
         self.process_manager.close()
 
         if self.ops_server is not None:
             self.ops_server.close()
+            self.ops_server = None
 
         if self.hydration_thread.loop.is_running():
             asyncio.run_coroutine_threadsafe(
@@ -187,10 +213,9 @@ class WorkerDaemon:
         signal.signal(signal.SIGINT, _handle_signal)
         signal.signal(signal.SIGTERM, _handle_signal)
 
-        self.start()
         try:
+            self.start()
             while not self._stop_event.is_set():
                 self._stop_event.wait(timeout=0.5)
         finally:
-            self._stop_event.clear()
             self.shutdown()

@@ -17,6 +17,17 @@ ALLOWED_ROOT_EXPRESSIONS: tuple[type[exp.Expression], ...] = (
     exp.Subquery,
 )
 
+
+def _optional_exp_nodes(*names: str) -> tuple[type[exp.Expression], ...]:
+    """Return sqlglot Expression subclasses that exist in the installed sqlglot version."""
+    nodes: list[type[exp.Expression]] = []
+    for name in names:
+        cls = getattr(exp, name, None)
+        if isinstance(cls, type) and issubclass(cls, exp.Expression):
+            nodes.append(cls)
+    return tuple(nodes)
+
+
 # Explicitly banned statement/command AST node types.
 BANNED_AST_NODES: tuple[type[exp.Expression], ...] = (
     exp.Command,
@@ -33,7 +44,6 @@ BANNED_AST_NODES: tuple[type[exp.Expression], ...] = (
     exp.Attach,
     exp.Detach,
     exp.LoadData,
-    exp.Install,
     exp.Describe,
     exp.Show,
     exp.Summarize,
@@ -43,7 +53,35 @@ BANNED_AST_NODES: tuple[type[exp.Expression], ...] = (
     exp.Commit,
     exp.Rollback,
     exp.Grant,
-    exp.Revoke,
+    *_optional_exp_nodes("Install", "Revoke"),
+)
+
+# Approved date/time unit identifiers when sqlglot parses them as exp.Var(unit=...).
+APPROVED_DATE_UNITS: frozenset[str] = frozenset(
+    {
+        "year",
+        "years",
+        "quarter",
+        "quarters",
+        "month",
+        "months",
+        "week",
+        "weeks",
+        "day",
+        "days",
+        "hour",
+        "hours",
+        "minute",
+        "minutes",
+        "second",
+        "seconds",
+        "millisecond",
+        "milliseconds",
+        "microsecond",
+        "microseconds",
+        "nanosecond",
+        "nanoseconds",
+    }
 )
 
 # Banned function names (lowercased) that access files, network, or DuckDB internals.

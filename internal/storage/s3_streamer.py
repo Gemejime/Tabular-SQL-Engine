@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -43,35 +44,49 @@ class S3Streamer:
         self._injected_client = client
         self._client_ctx: Any | None = None
         self._client: Any | None = client
+        self._client_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Initialize the aiobotocore S3 client inside the active asyncio event loop."""
         if self._client is not None:
             return
-        session = get_session()
-        boto_config = Config(
-            region_name=self._region_name,
-            connect_timeout=self._timeout_seconds,
-            read_timeout=self._timeout_seconds,
-            retries={"max_attempts": 2, "mode": "standard"},
-        )
-        self._client_ctx = session.create_client(
-            "s3",
-            endpoint_url=self._endpoint_url,
-            region_name=self._region_name,
-            config=boto_config,
-        )
-        self._client = await self._client_ctx.__aenter__()
+        async with self._client_lock:
+            if self._client is not None:
+                return
+            session = get_session()
+            boto_config = Config(
+                region_name=self._region_name,
+                connect_timeout=self._timeout_seconds,
+                read_timeout=self._timeout_seconds,
+                retries={"max_attempts": 2, "mode": "standard"},
+            )
+            ctx = session.create_client(
+                "s3",
+                endpoint_url=self._endpoint_url,
+                region_name=self._region_name,
+                config=boto_config,
+            )
+            client = await ctx.__aenter__()
+            self._client_ctx = ctx
+            self._client = client
 
     async def close(self) -> None:
         """Close the aiobotocore S3 client inside the active asyncio event loop."""
-        if self._client_ctx is not None:
-            await self._client_ctx.__aexit__(None, None, None)
-            self._client_ctx = None
-        if self._injected_client is None:
-            self._client = None
+        async with self._client_lock:
+            if self._client_ctx is not None:
+                await self._client_ctx.__aexit__(None, None, None)
+                self._client_ctx = None
+            if self._injected_client is None:
+                self._client = None
 
-    async def stream_to_file(self, bucket: str, key: str, dest_tmp_path: Path) -> int:
+    async def stream_to_file(
+        self,
+        bucket: str,
+        key: str,
+        dest_tmp_path: Path,
+        *,
+        on_chunk: Callable[[int], None] | None = None,
+    ) -> int:
         """Stream an S3 Parquet object chunk-by-chunk directly to a local temp file."""
         if self._client is None:
             await self.start()
@@ -89,6 +104,8 @@ class S3Streamer:
                         if hasattr(body, "iter_chunks"):
                             async for chunk in body.iter_chunks(chunk_size=self._chunk_size_bytes):
                                 if chunk:
+                                    if on_chunk is not None:
+                                        on_chunk(len(chunk))
                                     fh.write(chunk)
                                     total_bytes += len(chunk)
                         else:
@@ -96,6 +113,8 @@ class S3Streamer:
                                 chunk = await body.read(self._chunk_size_bytes)
                                 if not chunk:
                                     break
+                                if on_chunk is not None:
+                                    on_chunk(len(chunk))
                                 fh.write(chunk)
                                 total_bytes += len(chunk)
                         fh.flush()

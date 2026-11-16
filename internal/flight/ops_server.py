@@ -62,6 +62,10 @@ class OpsState:
         """Mark the worker as draining so /ready returns 503 Service Unavailable."""
         self._draining.set()
 
+    def clear_draining(self) -> None:
+        """Clear the draining flag when starting or restarting the daemon."""
+        self._draining.clear()
+
     def is_draining(self) -> bool:
         """Return True if graceful shutdown drain has been initiated."""
         return self._draining.is_set()

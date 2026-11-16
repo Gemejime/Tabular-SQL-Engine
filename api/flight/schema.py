@@ -61,7 +61,7 @@ def map_exception_to_flight_error(exc: BaseException) -> fl.FlightError:
             )
         )
 
-    if isinstance(exc, (PydanticValidationError, TableValidationError, SQLValidationError)):
+    if isinstance(exc, PydanticValidationError | TableValidationError | SQLValidationError):
         if isinstance(exc, SQLValidationError):
             detail = f"SQL validation failed ({exc.rule})."
         elif isinstance(exc, TableValidationError):
@@ -80,7 +80,7 @@ def map_exception_to_flight_error(exc: BaseException) -> fl.FlightError:
             )
         )
 
-    if isinstance(exc, (ConcurrencyLimitError, CacheCapacityError)):
+    if isinstance(exc, ConcurrencyLimitError | CacheCapacityError):
         return fl.FlightServerError(
             sanitize_client_message(
                 FlightErrorCode.RESOURCE_EXHAUSTED,
@@ -96,7 +96,7 @@ def map_exception_to_flight_error(exc: BaseException) -> fl.FlightError:
             )
         )
 
-    if isinstance(exc, (CorruptedArtifactError, S3AccessError)):
+    if isinstance(exc, CorruptedArtifactError | S3AccessError):
         return fl.FlightInternalError(
             sanitize_client_message(
                 FlightErrorCode.INTERNAL,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlglot
 from sqlglot import Dialect, exp
-from sqlglot.errors import ParseError
+from sqlglot.errors import ParseError, TokenError
 
 from internal.validator.exceptions import (
     ASTSyntaxError,
@@ -19,6 +19,7 @@ from internal.validator.rules import (
     ALLOWED_ANONYMOUS_FUNCTIONS,
     ALLOWED_ROOT_EXPRESSIONS,
     ALLOWED_STRUCTURAL_NODES,
+    APPROVED_DATE_UNITS,
     BANNED_AST_NODES,
     BANNED_FUNCTION_NAMES,
     BANNED_FUNCTION_PREFIXES,
@@ -80,7 +81,7 @@ class ASTValidator:
 
         try:
             statements = sqlglot.parse(sql, read=self._dialect)
-        except ParseError as exc:
+        except (ParseError, TokenError) as exc:
             raise ASTSyntaxError(f"Failed to parse SQL query: {exc}") from exc
 
         non_empty = [stmt for stmt in statements if stmt is not None]
@@ -94,7 +95,7 @@ class ASTValidator:
                 "only read-only SELECT is allowed."
             )
 
-        cte_names = self._collect_and_validate_ctes(root)
+        self._validate_cte_aliases(root)
         join_count = 0
 
         for node in root.walk():
@@ -103,7 +104,7 @@ class ASTValidator:
                     f"Disallowed AST construct {type(node).__name__} detected."
                 )
 
-            if not self._is_allowed_node(node):
+            if not self._is_allowed_node(node) and not self._is_approved_date_unit_var(node):
                 raise DisallowedStatementError(
                     f"Unallowlisted AST node {type(node).__name__} detected."
                 )
@@ -119,23 +120,65 @@ class ASTValidator:
                 self._validate_function(node)
 
             if isinstance(node, exp.Table):
-                self._validate_table(node, allowed_table_alias, cte_names)
+                self._validate_table(node, allowed_table_alias)
 
-            if isinstance(node, (exp.Alias, exp.TableAlias)):
+            if isinstance(node, exp.Alias | exp.TableAlias):
                 self._validate_alias(node)
 
         return root
 
     @staticmethod
-    def _collect_and_validate_ctes(root: exp.Expression) -> set[str]:
-        """Collect all CTE names defined in WITH clauses and validate their identifiers."""
-        cte_names: set[str] = set()
+    def _is_approved_date_unit_var(node: exp.Expression) -> bool:
+        """Allow exp.Var only when used as an approved unit argument on date functions."""
+        if not isinstance(node, exp.Var) or node.arg_key != "unit":
+            return False
+        if not isinstance(
+            node.parent,
+            exp.DateDiff | exp.DateTrunc | exp.DateAdd | exp.DateSub | exp.Extract,
+        ):
+            return False
+        return node.name.lower() in APPROVED_DATE_UNITS
+
+    @staticmethod
+    def _validate_cte_aliases(root: exp.Expression) -> None:
+        """Validate all CTE alias identifiers defined in WITH clauses."""
         for cte in root.find_all(exp.CTE):
             alias_name = cte.alias_or_name
             if not alias_name or not SAFE_IDENTIFIER_RE.match(alias_name):
                 raise DisallowedAliasError(f"Invalid CTE alias: {alias_name!r}")
-            cte_names.add(alias_name.lower())
-        return cte_names
+
+    @staticmethod
+    def _is_descendant_or_self(node: exp.Expression, ancestor: exp.Expression) -> bool:
+        curr: exp.Expression | None = node
+        while curr is not None:
+            if curr is ancestor:
+                return True
+            curr = curr.parent
+        return False
+
+    @classmethod
+    def _visible_cte_names(cls, table: exp.Table) -> set[str]:
+        """Collect CTE names visible from ``table``'s lexical SQL scope."""
+        visible: set[str] = set()
+        child: exp.Expression = table
+        curr = table.parent
+        while curr is not None:
+            with_clause = curr.args.get("with_")
+            if isinstance(with_clause, exp.With):
+                is_recursive = bool(with_clause.args.get("recursive"))
+                for cte in with_clause.expressions:
+                    if not isinstance(cte, exp.CTE):
+                        continue
+                    alias_name = cte.alias_or_name
+                    if child is with_clause and cls._is_descendant_or_self(table, cte):
+                        if is_recursive and alias_name:
+                            visible.add(alias_name.lower())
+                        break
+                    if alias_name:
+                        visible.add(alias_name.lower())
+            child = curr
+            curr = curr.parent
+        return visible
 
     @staticmethod
     def _validate_function(node: exp.Func) -> None:
@@ -154,13 +197,13 @@ class ASTValidator:
         if sql_name in BANNED_FUNCTION_NAMES or sql_name.startswith(BANNED_FUNCTION_PREFIXES):
             raise DisallowedFunctionError(f"Function '{sql_name}' is explicitly banned.")
 
-    @staticmethod
+    @classmethod
     def _validate_table(
+        cls,
         table: exp.Table,
         allowed_table_alias: str,
-        cte_names: set[str],
     ) -> None:
-        """Ensure table references point only to the bound alias or a local CTE without schemas."""
+        """Ensure table references point only to the bound alias or a visible local CTE."""
         if table.catalog or table.db:
             raise DisallowedTableReferenceError(
                 "Schema-qualified or catalog-qualified table references are not permitted."
@@ -177,7 +220,7 @@ class ASTValidator:
             raise DisallowedTableReferenceError(f"Invalid table identifier: {table_name!r}")
 
         lowered = table_name.lower()
-        if lowered != allowed_table_alias.lower() and lowered not in cte_names:
+        if lowered != allowed_table_alias.lower() and lowered not in cls._visible_cte_names(table):
             raise DisallowedTableReferenceError(
                 f"Table '{table_name}' is not permitted; "
                 f"only '{allowed_table_alias}' or local CTEs are allowed."

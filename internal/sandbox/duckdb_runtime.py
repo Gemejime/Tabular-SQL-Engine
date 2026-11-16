@@ -18,7 +18,7 @@ def _get_arrow_reader(
     batch_size: int,
 ) -> pa.RecordBatchReader:
     """Return a streaming PyArrow RecordBatchReader without full-table copies."""
-    reader: pa.RecordBatchReader = conn.sql(sql).to_arrow_reader(batch_size=batch_size)
+    reader: pa.RecordBatchReader = conn.sql(sql).fetch_arrow_reader(batch_size=batch_size)
     return reader
 
 
