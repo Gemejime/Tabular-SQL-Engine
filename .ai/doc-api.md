@@ -57,6 +57,16 @@ Verifies the `ProcessPoolExecutor` supervisor has active pre-allocated worker ca
   }
 }
 ```
+or when a dependency check fails:
+```json
+{
+  "status": "not_ready",
+  "checks": {
+    "process_pool": "unhealthy",
+    "cache_mount": "writable"
+  }
+}
+```
 
 #### 3. `GET /metrics`
 Exposes Prometheus text exposition metrics (`text/plain; version=0.0.4`).
