@@ -53,7 +53,14 @@ BANNED_AST_NODES: tuple[type[exp.Expression], ...] = (
     exp.Commit,
     exp.Rollback,
     exp.Grant,
-    *_optional_exp_nodes("Install", "Revoke"),
+    *_optional_exp_nodes(
+        "Install",
+        "Revoke",
+        "ReadParquet",
+        "ReadCSV",
+        "ReadJSON",
+        "ScanParquet",
+    ),
 )
 
 # Approved date/time unit identifiers when sqlglot parses them as exp.Var(unit=...).
