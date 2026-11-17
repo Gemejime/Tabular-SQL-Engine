@@ -234,3 +234,67 @@ def test_flight_do_get_do_action_and_ops_endpoints(
     status, body = _http_get(http_port, "/ready")
     assert status == 503
     assert json.loads(body)["status"] == "draining"
+
+
+def test_flight_do_get_emits_otel_spans_and_updates_active_queries(
+    running_daemon: tuple[WorkerDaemon, _FakeS3Client, str, str],
+) -> None:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    daemon, _fake_s3, table_hash, s3_key = running_daemon
+    assert daemon.flight_server is not None
+    assert daemon.ops_server is not None
+
+    exporter = InMemorySpanExporter()
+    current_provider = trace.get_tracer_provider()
+    if isinstance(current_provider, TracerProvider):
+        provider = current_provider
+        owns_provider = False
+    else:
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+        owns_provider = True
+    processor = SimpleSpanProcessor(exporter)
+    provider.add_span_processor(processor)
+    try:
+        client = fl.FlightClient(f"grpc://127.0.0.1:{daemon.flight_server.port}")
+        trace_id = "abcdef0123456789abcdef0123456789"
+        call_opts = fl.FlightCallOptions(
+            headers=[(b"traceparent", f"00-{trace_id}-00f067aa0ba902b7-01".encode())]
+        )
+        ticket_bytes = json.dumps(
+            {
+                "request_id": "req_otel_01",
+                "tenant_id": "tenant-corp-01",
+                "sql": "SELECT COUNT(*) AS cnt FROM tbl",
+                "table_alias": "tbl",
+                "table_hash": table_hash,
+                "s3_bucket": "rag-tabular-artifacts",
+                "s3_key": s3_key,
+            }
+        ).encode("utf-8")
+
+        table = client.do_get(fl.Ticket(ticket_bytes), options=call_opts).read_all()
+        assert table.num_rows == 1
+
+        spans = exporter.get_finished_spans()
+        span_names = {s.name for s in spans}
+        assert "flight.do_get" in span_names
+        assert "sqlglot.validate" in span_names
+        assert "storage.get_or_hydrate" in span_names
+        assert "duckdb.subprocess_execute" in span_names
+        for span in spans:
+            assert format(span.context.trace_id, "032x") == trace_id
+            if span.attributes:
+                assert "sql" not in span.attributes
+
+        status, body = _http_get(daemon.ops_server.port, "/metrics")
+        assert status == 200
+        assert "tabular_worker_active_queries 0.0" in body
+    finally:
+        provider.force_flush()
+        if owns_provider:
+            provider.shutdown()

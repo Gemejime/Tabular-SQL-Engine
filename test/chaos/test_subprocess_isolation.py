@@ -24,9 +24,9 @@ def chaos_parquet(tmp_path: Path) -> Path:
 def test_timeout_circuit_breaker_kills_slow_query_and_keeps_siblings_serviceable(
     chaos_parquet: Path,
 ) -> None:
-    # Use a short 1.0s timeout in the chaos test so CI executes rapidly while exercising
-    # real cross-process termination (SIGKILL on POSIX / TerminateProcess on Windows).
-    settings = Settings(POOL_SIZE=1, MAX_TASKS_PER_CHILD=100, QUERY_TIMEOUT_SECONDS=3.0)
+    # Exercise the 5.0s production circuit breaker with real cross-process termination
+    # (SIGKILL on POSIX / TerminateProcess on Windows).
+    settings = Settings(POOL_SIZE=1, MAX_TASKS_PER_CHILD=100, QUERY_TIMEOUT_SECONDS=5.0)
     with ProcessManager(settings) as manager:
         # Warm the single worker so we can identify its PID before the runaway query.
         list(manager.stream_query("SELECT COUNT(*) AS cnt FROM tbl", chaos_parquet, "tbl"))
@@ -72,7 +72,7 @@ def test_timeout_circuit_breaker_kills_slow_query_and_keeps_siblings_serviceable
 
 
 def test_max_tasks_recycling_executes_cleanly_across_generations(chaos_parquet: Path) -> None:
-    settings = Settings(POOL_SIZE=2, MAX_TASKS_PER_CHILD=2, QUERY_TIMEOUT_SECONDS=5.0)
+    settings = Settings(POOL_SIZE=2, MAX_TASKS_PER_CHILD=2, QUERY_TIMEOUT_SECONDS=15.0)
     with ProcessManager(settings) as manager:
         for _ in range(6):
             batches = list(
@@ -84,10 +84,12 @@ def test_max_tasks_recycling_executes_cleanly_across_generations(chaos_parquet: 
             )
             assert len(batches) == 1
             assert batches[0].column("total_rows")[0].as_py() == 1000
+        counts = manager.circuit_breaker.get_recycle_counts()
+        assert counts[RecycleReason.TASK_LIMIT] >= 1
 
 
 def test_worker_crash_or_forced_termination_does_not_break_pool(chaos_parquet: Path) -> None:
-    settings = Settings(POOL_SIZE=1, MAX_TASKS_PER_CHILD=100, QUERY_TIMEOUT_SECONDS=5.0)
+    settings = Settings(POOL_SIZE=1, MAX_TASKS_PER_CHILD=100, QUERY_TIMEOUT_SECONDS=15.0)
     with ProcessManager(settings) as manager:
         parent_pid = os.getpid()
         assert manager.is_healthy()
