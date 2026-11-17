@@ -79,6 +79,7 @@ Exposes Prometheus text exposition metrics (`text/plain; version=0.0.4`).
 - **Protocol**: Apache Arrow Flight over HTTP/2 gRPC (`FlightServerBase`).
 - **Primary Caller**: `rag-search-orchestrator` (Go).
 - **Egress Format**: Zero-copy chunked Arrow `RecordBatch` stream (no JSON row serialization).
+- **Distributed Tracing Headers**: Supports W3C `traceparent` and `tracestate` gRPC metadata headers on `DoGet` and `DoAction` for OpenTelemetry context propagation (`trace_id` log correlation).
 
 ### `DoGet(context, ticket)` — Execute Sandboxed Analytical Query
 - **Ticket Payload (`api/flight/schema.py`)**:
@@ -128,6 +129,6 @@ Exposes Prometheus text exposition metrics (`text/plain; version=0.0.4`).
 | `tabular_worker_cache_hits_total` | Counter | — | Total local Parquet cache hits (for multi-pod PromQL aggregation) |
 | `tabular_worker_cache_misses_total` | Counter | — | Total local Parquet cache misses (for multi-pod PromQL aggregation) |
 | `tabular_worker_cache_bytes_used` | Gauge | — | Current local NVMe cache disk utilization |
-| `tabular_worker_subprocess_recycles_total` | Counter | `reason` (`TIMEOUT`, `MEMORY_LIMIT`, `TASK_LIMIT`) | Child worker recycling events |
+| `tabular_worker_subprocess_recycles_total` | Counter | `reason` (`TIMEOUT`, `MEMORY_LIMIT`, `TASK_LIMIT`, `CRASH`) | Child worker recycling events |
 | `tabular_worker_flight_stream_bytes_total` | Counter | — | Total zero-copy Arrow Flight bytes streamed |
 | `tabular_worker_ast_rejections_total` | Counter | `rule` | Rejected SQL statements by violated AST rule |
