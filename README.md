@@ -35,3 +35,30 @@ bandit -r cmd internal api -ll
 pip-audit
 pytest -v test/unit test/security test/chaos test/integration
 ```
+
+### Extended Soak & SLO Endurance Tests
+
+The default `test/chaos` suite runs a fast 500-stream bounded concurrency soak and burst backpressure test. To run the opt-in 8-hour `jemalloc` and `P95 <= 45ms` endurance suite:
+
+```bash
+RUN_SOAK_TESTS=1 pytest -v -m soak test/chaos
+```
+
+## Container & Kubernetes Deployment
+
+### Multi-Stage Production Docker Image (`jemalloc` Preloaded)
+
+```bash
+docker build -f deployments/docker/Dockerfile -t rag-tabular-analytics-worker:0.1.0 .
+docker run --rm -p 8815:8815 -p 8080:8080 --read-only --tmpfs /tmp:rw,size=256m rag-tabular-analytics-worker:0.1.0
+```
+
+### Helm & ArgoCD Progressive Canary Rollout
+
+- **Staging**: `deployments/helm/values-staging.yaml` and `deployments/argocd/application-staging.yaml`
+- **Production**: `deployments/helm/values-prod.yaml`, `deployments/argocd/application-prod.yaml`, and `deployments/argocd/rollout-canary.yaml` (`10% -> 25% -> 50% -> 100%` gated by `AnalysisTemplate` over Prometheus SLIs)
+
+```bash
+helm lint deployments/helm
+helm template rag-tabular-analytics-worker deployments/helm -f deployments/helm/values-prod.yaml > /dev/null
+```
