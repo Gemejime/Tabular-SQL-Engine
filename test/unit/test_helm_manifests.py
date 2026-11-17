@@ -55,7 +55,7 @@ def test_helm_templates_contain_required_k8s_and_keda_directives() -> None:
     assert "kind: ScaledObject" in scaledobject_tpl
     assert "minReplicaCount:" in scaledobject_tpl
     assert "maxReplicaCount:" in scaledobject_tpl
-    assert "avg(tabular_worker_active_queries{" in scaledobject_tpl
+    assert "sum(tabular_worker_active_queries{" in scaledobject_tpl
 
 
 def test_dockerfile_and_dockerignore_harden_nonroot_jemalloc_runtime() -> None:

@@ -244,13 +244,22 @@ def test_burst_backpressure_returns_resource_exhausted_without_permit_leak(
             )
         ).read_all()
 
-        # Hold the single concurrency permit with a slower cross-join query.
-        holder_started = threading.Event()
+        # Hold the single concurrency permit on the server until the burst finishes.
+        permit_acquired = threading.Event()
+        release_holder = threading.Event()
         holder_done = threading.Event()
+        orig_stream_query = daemon.process_manager.stream_query
+
+        def _synchronized_stream_query(sql: str, parquet_path: Path, table_alias: str):  # type: ignore[no-untyped-def]
+            if "CROSS JOIN" in sql:
+                permit_acquired.set()
+                release_holder.wait(timeout=10.0)
+            return orig_stream_query(sql, parquet_path, table_alias)
+
+        daemon.process_manager.stream_query = _synchronized_stream_query  # type: ignore[method-assign]
 
         def _hold_slot() -> None:
             client = fl.FlightClient(f"grpc://127.0.0.1:{port}")
-            holder_started.set()
             client.do_get(
                 _make_ticket(
                     request_id="req-burst-holder",
@@ -264,31 +273,36 @@ def test_burst_backpressure_returns_resource_exhausted_without_permit_leak(
             holder_done.set()
 
         holder = threading.Thread(target=_hold_slot, daemon=True)
-        holder.start()
-        holder_started.wait(timeout=2.0)
-        time.sleep(0.05)
-
         burst_client = fl.FlightClient(f"grpc://127.0.0.1:{port}")
         rejected_exhausted = 0
-        for i in range(5):
-            try:
-                burst_client.do_get(
-                    _make_ticket(
-                        request_id=f"req-burst-{i}",
-                        tenant_id=tenant_id,
-                        sql="SELECT COUNT(*) AS cnt FROM tbl",
-                        table_hash=table_hash,
-                        bucket=bucket,
-                        s3_key=s3_key,
-                    )
-                ).read_all()
-            except fl.FlightError as exc:
-                if "MAX_CONCURRENT_QUERIES" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
-                    rejected_exhausted += 1
+        try:
+            holder.start()
+            assert permit_acquired.wait(timeout=5.0)
+            assert daemon.metrics.active_queries._value.get() == 1.0  # noqa: SLF001
 
-        holder.join(timeout=10.0)
+            for i in range(5):
+                try:
+                    burst_client.do_get(
+                        _make_ticket(
+                            request_id=f"req-burst-{i}",
+                            tenant_id=tenant_id,
+                            sql="SELECT COUNT(*) AS cnt FROM tbl",
+                            table_hash=table_hash,
+                            bucket=bucket,
+                            s3_key=s3_key,
+                        )
+                    ).read_all()
+                except fl.FlightError as exc:
+                    if "MAX_CONCURRENT_QUERIES" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                        rejected_exhausted += 1
+
+            assert rejected_exhausted >= 1
+        finally:
+            release_holder.set()
+            holder.join(timeout=10.0)
+            daemon.process_manager.stream_query = orig_stream_query  # type: ignore[method-assign]
+
         assert holder_done.is_set()
-        assert rejected_exhausted >= 1
 
         # Verify permit was cleanly released and subsequent query succeeds.
         assert daemon.metrics.active_queries._value.get() == 0.0  # noqa: SLF001
