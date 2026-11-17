@@ -1,0 +1,85 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: rag-tabular-analytics-worker-canary-analysis
+  namespace: rag-tabular-prod
+spec:
+  args:
+    - name: prometheus-url
+      value: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+  metrics:
+    - name: query-latency-p99
+      interval: 30s
+      count: 4
+      failureLimit: 1
+      successCondition: "len(result) == 0 || result[0] <= 0.12"
+      provider:
+        prometheus:
+          address: "{{args.prometheus-url}}"
+          query: |
+            histogram_quantile(0.99, sum(rate(tabular_worker_query_duration_seconds_bucket{cache_state="warm_cache"}[2m])) by (le))
+    - name: subprocess-abnormal-recycles
+      interval: 30s
+      count: 4
+      failureLimit: 1
+      successCondition: "len(result) == 0 || result[0] <= 0.05"
+      provider:
+        prometheus:
+          address: "{{args.prometheus-url}}"
+          query: |
+            sum(rate(tabular_worker_subprocess_recycles_total{reason=~"TIMEOUT|MEMORY_LIMIT|CRASH"}[2m]))
+    - name: cache-hit-ratio
+      interval: 30s
+      count: 4
+      failureLimit: 2
+      successCondition: "len(result) == 0 || result[0] >= 0.80"
+      provider:
+        prometheus:
+          address: "{{args.prometheus-url}}"
+          query: |
+            avg(tabular_worker_cache_hit_ratio)
+    - name: active-queries
+      interval: 30s
+      count: 4
+      successCondition: "len(result) == 0 || result[0] >= 0"
+      provider:
+        prometheus:
+          address: "{{args.prometheus-url}}"
+          query: |
+            avg(tabular_worker_active_queries)
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: rag-tabular-analytics-worker
+  namespace: rag-tabular-prod
+spec:
+  replicas: 4
+  workloadRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: rag-tabular-analytics-worker
+  strategy:
+    canary:
+      canaryService: rag-tabular-analytics-worker-canary
+      stableService: rag-tabular-analytics-worker
+      steps:
+        - setWeight: 10
+        - pause:
+            duration: 2m
+        - analysis:
+            templates:
+              - templateName: rag-tabular-analytics-worker-canary-analysis
+        - setWeight: 25
+        - pause:
+            duration: 5m
+        - analysis:
+            templates:
+              - templateName: rag-tabular-analytics-worker-canary-analysis
+        - setWeight: 50
+        - pause:
+            duration: 10m
+        - analysis:
+            templates:
+              - templateName: rag-tabular-analytics-worker-canary-analysis
+        - setWeight: 100

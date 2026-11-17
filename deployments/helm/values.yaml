@@ -26,8 +26,8 @@ cache:
   sizeLimit: 10Gi
 
 jemalloc:
-  enabled: false
-  path: /usr/lib/x86_64-linux-gnu/libjemalloc.so
+  enabled: true
+  path: /usr/local/lib/libjemalloc.so
 
 securityContext:
   runAsNonRoot: true
