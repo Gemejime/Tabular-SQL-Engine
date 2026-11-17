@@ -9,6 +9,8 @@ import sys
 from datetime import UTC, datetime
 from typing import Any
 
+from opentelemetry import trace as otel_trace
+
 REDACTED = "[REDACTED]"
 
 _BEARER_RE = re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9\-._~+/]+=*")
@@ -100,6 +102,11 @@ class JsonLogFormatter(logging.Formatter):
             field_val = getattr(record, field_name, None)
             if field_val is not None:
                 payload[field_name] = _redact_value(field_val)
+
+        if "trace_id" not in payload:
+            span_ctx = otel_trace.get_current_span().get_span_context()
+            if span_ctx.is_valid:
+                payload["trace_id"] = format(span_ctx.trace_id, "032x")
 
         extra_fields = getattr(record, "extra_fields", None)
         if isinstance(extra_fields, dict):

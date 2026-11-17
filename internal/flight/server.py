@@ -9,6 +9,7 @@ import pyarrow.flight as fl
 
 from api.flight.schema import FlightErrorCode, sanitize_client_message
 from internal.flight.handlers import FlightHandlers
+from internal.telemetry.tracing import attach_flight_trace_context
 
 
 class TabularFlightServer(fl.FlightServerBase):  # type: ignore[misc]
@@ -29,7 +30,8 @@ class TabularFlightServer(fl.FlightServerBase):  # type: ignore[misc]
         ticket: fl.Ticket,
     ) -> fl.FlightDataStream:
         """Execute a validated SQL query and stream zero-copy Arrow RecordBatch chunks."""
-        return self._handlers.handle_do_get(ticket.ticket)
+        with attach_flight_trace_context(context):
+            return self._handlers.handle_do_get(ticket.ticket)
 
     def list_actions(self, context: fl.ServerCallContext) -> list[tuple[str, str]]:
         """Advertise supported Flight DoAction operations."""
@@ -45,14 +47,15 @@ class TabularFlightServer(fl.FlightServerBase):  # type: ignore[misc]
     ) -> Iterator[fl.Result]:
         """Handle `cache_warm` and `health_check` Flight actions."""
         action_type = action.type
-        if action_type == "cache_warm":
-            payload = self._handlers.handle_cache_warm(action.body.to_pybytes())
-            yield fl.Result(payload)
-            return
-        if action_type == "health_check":
-            payload = self._handlers.handle_health_check()
-            yield fl.Result(payload)
-            return
+        with attach_flight_trace_context(context):
+            if action_type == "cache_warm":
+                payload = self._handlers.handle_cache_warm(action.body.to_pybytes())
+                yield fl.Result(payload)
+                return
+            if action_type == "health_check":
+                payload = self._handlers.handle_health_check()
+                yield fl.Result(payload)
+                return
 
         raise fl.FlightServerError(
             sanitize_client_message(

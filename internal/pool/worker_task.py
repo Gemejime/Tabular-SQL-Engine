@@ -3,12 +3,39 @@
 from __future__ import annotations
 
 import io
+import os
+import sys
 from multiprocessing.connection import Client
 from pathlib import Path
 from typing import Protocol
 
 from internal.sandbox.duckdb_runtime import stream_query_to_ipc
 from internal.sandbox.security_profile import SandboxProfile
+from internal.telemetry.logging import get_logger
+
+_logger = get_logger("internal.pool.worker_task")
+
+
+def init_worker_process(rlimit_bytes: int | None = None) -> None:
+    """Initialize a newly spawned worker subprocess with optional POSIX address-space limit."""
+    if rlimit_bytes is None or sys.platform == "win32":
+        return
+    try:
+        import resource
+
+        _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        target = rlimit_bytes if hard == resource.RLIM_INFINITY else min(rlimit_bytes, hard)
+        resource.setrlimit(resource.RLIMIT_AS, (target, hard))
+    except (ImportError, OSError, ValueError) as exc:
+        _logger.warning(
+            "Unable to apply WORKER_PROCESS_RLIMIT_BYTES in worker subprocess",
+            extra={"extra_fields": {"error_type": type(exc).__name__}},
+        )
+
+
+def ping_worker() -> int:
+    """Warm up worker subprocess imports (DuckDB, PyArrow) and return worker PID."""
+    return os.getpid()
 
 
 class _IpcSendConn(Protocol):
@@ -45,10 +72,11 @@ def run_sandboxed_query_task(
     batch_size: int,
     ipc_address: str,
     authkey: bytes,
-) -> int:
+) -> tuple[int, int]:
     """Execute a validated SQL query in an ephemeral DuckDB sandbox and stream Arrow IPC.
 
     This function is top-level so it is safe under ``spawn`` multiprocessing.
+    Returns ``(total_rows, worker_pid)``.
     """
     profile = SandboxProfile(
         memory_limit=memory_limit,
@@ -68,6 +96,6 @@ def run_sandboxed_query_task(
         )
         # Signal clean end-of-stream to parent reader.
         conn.send_bytes(b"")
-        return total_rows
+        return total_rows, os.getpid()
     finally:
         conn.close()

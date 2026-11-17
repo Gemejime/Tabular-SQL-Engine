@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     # Concurrency & KEDA Backpressure (ADR-004)
     MAX_CONCURRENT_QUERIES: int = Field(default=4, ge=1, le=64)
 
+    # Optional POSIX worker address-space guardrail (disabled by default; ADR-003 uses DuckDB limit)
+    WORKER_PROCESS_RLIMIT_BYTES: int | None = Field(default=None, ge=64 * MIB_BYTES)
+
+    # OpenTelemetry Distributed Tracing
+    OTEL_ENABLED: bool = Field(default=False)
+    OTEL_EXPORTER_ENDPOINT: str | None = Field(default=None)
+    OTEL_SERVICE_NAME: str = Field(default="rag-tabular-analytics-worker")
+
     @model_validator(mode="after")
     def _validate_worker_memory_budget(self) -> Settings:
         """Ensure each worker receives at least 1 MiB within the aggregate DuckDB budget."""

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: rag-tabular-analytics-worker
+description: Stateless, horizontally autoscaling Apache Arrow Flight microservice executing sandboxed DuckDB queries over Parquet artifacts.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

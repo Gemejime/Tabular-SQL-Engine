@@ -30,6 +30,15 @@ class QueryTimeoutError(TimeoutError):
 class WorkerCrashError(RuntimeError):
     """Raised when a child worker terminates unexpectedly (SIGKILL, OOM, or panic)."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: RecycleReason = RecycleReason.CRASH,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+
 
 class CircuitBreaker:
     """Monitors subprocess futures against hard deadlines and tracks recycle reasons."""
@@ -79,5 +88,6 @@ class CircuitBreaker:
                 },
             )
             raise WorkerCrashError(
-                f"Worker subprocess exited unexpectedly (exit_code={exit_code})."
+                f"Worker subprocess exited unexpectedly (exit_code={exit_code}).",
+                reason=reason,
             ) from exc

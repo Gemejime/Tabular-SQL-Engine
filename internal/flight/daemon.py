@@ -18,6 +18,11 @@ from internal.storage.s3_streamer import S3Streamer
 from internal.storage.table_resolver import TableResolver
 from internal.telemetry.logging import get_logger
 from internal.telemetry.metrics import MetricsRegistry
+from internal.telemetry.tracing import (
+    FlightTracingMiddlewareFactory,
+    init_tracing,
+    shutdown_tracing,
+)
 from internal.validator.ast_validator import ASTValidator
 
 _logger = get_logger("internal.flight.daemon")
@@ -98,7 +103,7 @@ class WorkerDaemon:
             timeout_seconds=self.settings.S3_TIMEOUT_SECONDS,
             client=s3_client,
         )
-        self.process_manager = ProcessManager(self.settings)
+        self.process_manager = ProcessManager(self.settings, metrics=self.metrics)
         self.handlers = FlightHandlers(
             settings=self.settings,
             ast_validator=self.ast_validator,
@@ -128,6 +133,7 @@ class WorkerDaemon:
         self.ops_state.clear_draining()
 
         try:
+            init_tracing(self.settings)
             self.hydration_thread.start()
             self.handlers.set_hydration_loop(self.hydration_thread.loop)
             asyncio.run_coroutine_threadsafe(
@@ -139,7 +145,11 @@ class WorkerDaemon:
             self.process_manager.start()
 
             location = f"grpc://{self.settings.FLIGHT_HOST}:{self.settings.FLIGHT_PORT}"
-            self.flight_server = TabularFlightServer(location, self.handlers)
+            self.flight_server = TabularFlightServer(
+                location,
+                self.handlers,
+                middleware={"otel_tracing": FlightTracingMiddlewareFactory()},
+            )
             self._flight_thread = threading.Thread(
                 target=self.flight_server.serve,
                 name="arrow-flight-server",
@@ -198,6 +208,7 @@ class WorkerDaemon:
                 self.hydration_thread.loop,
             ).result(timeout=5.0)
         self.hydration_thread.stop()
+        shutdown_tracing()
         _logger.info("Shutdown complete")
 
     def run_forever(self) -> None:

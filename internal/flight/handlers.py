@@ -11,6 +11,7 @@ from concurrent.futures import Future
 
 import pyarrow as pa
 import pyarrow.flight as fl
+from opentelemetry.trace import Span
 from pydantic import ValidationError as PydanticValidationError
 
 from api.flight.actions import CacheWarmRequest, CacheWarmResponse, HealthCheckResponse
@@ -27,6 +28,13 @@ from internal.storage.s3_streamer import S3Streamer
 from internal.storage.table_resolver import ResolvedTable, TableResolver
 from internal.telemetry.logging import get_logger
 from internal.telemetry.metrics import MetricsRegistry
+from internal.telemetry.tracing import (
+    get_current_trace_id,
+    get_tracer,
+    record_sanitized_exception,
+    sanitize_span_attributes,
+    start_span,
+)
 from internal.validator.ast_validator import ASTValidator
 from internal.validator.exceptions import ValidationError as SQLValidationError
 
@@ -47,6 +55,8 @@ class _OwnedFlightBatchIterator:
         request_id: str,
         tenant_id: str,
         table_hash: str,
+        exec_span: Span | None = None,
+        trace_id: str | None = None,
     ) -> None:
         self._query_stream = query_stream
         self._batch_iter = iter(query_stream)
@@ -57,6 +67,8 @@ class _OwnedFlightBatchIterator:
         self._request_id = request_id
         self._tenant_id = tenant_id
         self._table_hash = table_hash
+        self._exec_span = exec_span
+        self._trace_id = trace_id
         self._stream_status = "ok"
         self._stream_bytes = 0
         self._cleanup_lock = threading.Lock()
@@ -74,15 +86,21 @@ class _OwnedFlightBatchIterator:
         except QueryTimeoutError as exc:
             self._stream_status = "timeout"
             self._metrics.inc_subprocess_recycle(RecycleReason.TIMEOUT.value)
+            if self._exec_span is not None:
+                record_sanitized_exception(self._exec_span, exc)
             self._cleanup()
             raise map_exception_to_flight_error(exc) from exc
         except WorkerCrashError as exc:
             self._stream_status = "worker_crash"
-            self._metrics.inc_subprocess_recycle(RecycleReason.CRASH.value)
+            self._metrics.inc_subprocess_recycle(exc.reason.value)
+            if self._exec_span is not None:
+                record_sanitized_exception(self._exec_span, exc)
             self._cleanup()
             raise map_exception_to_flight_error(exc) from exc
         except Exception as exc:
             self._stream_status = "error"
+            if self._exec_span is not None:
+                record_sanitized_exception(self._exec_span, exc)
             self._cleanup()
             raise map_exception_to_flight_error(exc) from exc
 
@@ -111,18 +129,29 @@ class _OwnedFlightBatchIterator:
         self._metrics.dec_active_queries()
         self._pinned.release()
         self._semaphore.release()
-        _logger.info(
-            "Completed Flight DoGet query stream",
-            extra={
-                "request_id": self._request_id,
-                "tenant_id": self._tenant_id,
-                "table_hash": self._table_hash,
-                "cache_state": self._pinned.cache_state,
-                "duration_ms": round(duration_s * 1000.0, 2),
-                "status": self._stream_status,
-                "extra_fields": {"stream_bytes": self._stream_bytes},
-            },
-        )
+        if self._exec_span is not None:
+            self._exec_span.set_attributes(
+                sanitize_span_attributes(
+                    {
+                        "cache_state": self._pinned.cache_state,
+                        "stream_bytes": self._stream_bytes,
+                        "status": self._stream_status,
+                    }
+                )
+            )
+            self._exec_span.end()
+        log_extra: dict[str, object] = {
+            "request_id": self._request_id,
+            "tenant_id": self._tenant_id,
+            "table_hash": self._table_hash,
+            "cache_state": self._pinned.cache_state,
+            "duration_ms": round(duration_s * 1000.0, 2),
+            "status": self._stream_status,
+            "extra_fields": {"stream_bytes": self._stream_bytes},
+        }
+        if self._trace_id is not None:
+            log_extra["trace_id"] = self._trace_id
+        _logger.info("Completed Flight DoGet query stream", extra=log_extra)
 
 
 class FlightHandlers:
@@ -212,134 +241,196 @@ class FlightHandlers:
         """Validate ticket and SQL AST, hydrate Parquet, and stream RecordBatch chunks."""
         start_time = time.perf_counter()
 
-        try:
-            ticket = FlightQueryTicket.model_validate_json(ticket_bytes)
-        except (PydanticValidationError, ValueError) as exc:
-            _logger.warning("Rejected malformed Flight ticket payload")
-            raise map_exception_to_flight_error(exc) from exc
+        with start_span("flight.do_get") as do_get_span:
+            try:
+                ticket = FlightQueryTicket.model_validate_json(ticket_bytes)
+            except (PydanticValidationError, ValueError) as exc:
+                _logger.warning("Rejected malformed Flight ticket payload")
+                raise map_exception_to_flight_error(exc) from exc
 
-        try:
-            resolved = self._table_resolver.resolve(
-                tenant_id=ticket.tenant_id,
-                table_hash=ticket.table_hash,
-                s3_bucket=ticket.s3_bucket,
-                s3_key=ticket.s3_key,
+            do_get_span.set_attributes(
+                sanitize_span_attributes(
+                    {
+                        "request_id": ticket.request_id,
+                        "tenant_id": ticket.tenant_id,
+                        "table_hash": ticket.table_hash,
+                        "table_alias": ticket.table_alias,
+                    }
+                )
             )
-            self._ast_validator.validate(ticket.sql, ticket.table_alias)
-        except SQLValidationError as exc:
-            self._metrics.inc_ast_rejection(exc.rule)
-            _logger.warning(
-                "Rejected SQL query during AST validation",
-                extra={
-                    "request_id": ticket.request_id,
-                    "tenant_id": ticket.tenant_id,
-                    "table_hash": ticket.table_hash,
-                    "rule": exc.rule,
-                },
-            )
-            raise map_exception_to_flight_error(exc) from exc
-        except Exception as exc:
-            _logger.warning(
-                "Rejected Flight ticket during table resolution",
-                extra={
-                    "request_id": ticket.request_id,
-                    "tenant_id": ticket.tenant_id,
-                    "table_hash": ticket.table_hash,
-                },
-            )
-            raise map_exception_to_flight_error(exc) from exc
 
-        if not self._concurrency_semaphore.acquire(blocking=False):
-            _logger.warning(
-                "Pod concurrency limit saturated; returning RESOURCE_EXHAUSTED",
-                extra={
-                    "request_id": ticket.request_id,
-                    "tenant_id": ticket.tenant_id,
-                    "table_hash": ticket.table_hash,
-                },
-            )
-            raise map_exception_to_flight_error(ConcurrencyLimitError())
+            try:
+                resolved = self._table_resolver.resolve(
+                    tenant_id=ticket.tenant_id,
+                    table_hash=ticket.table_hash,
+                    s3_bucket=ticket.s3_bucket,
+                    s3_key=ticket.s3_key,
+                )
+                with start_span(
+                    "sqlglot.validate",
+                    attributes={
+                        "request_id": ticket.request_id,
+                        "tenant_id": ticket.tenant_id,
+                        "table_hash": ticket.table_hash,
+                    },
+                ):
+                    self._ast_validator.validate(ticket.sql, ticket.table_alias)
+            except SQLValidationError as exc:
+                self._metrics.inc_ast_rejection(exc.rule)
+                _logger.warning(
+                    "Rejected SQL query during AST validation",
+                    extra={
+                        "request_id": ticket.request_id,
+                        "tenant_id": ticket.tenant_id,
+                        "table_hash": ticket.table_hash,
+                        "rule": exc.rule,
+                    },
+                )
+                raise map_exception_to_flight_error(exc) from exc
+            except Exception as exc:
+                _logger.warning(
+                    "Rejected Flight ticket during table resolution",
+                    extra={
+                        "request_id": ticket.request_id,
+                        "tenant_id": ticket.tenant_id,
+                        "table_hash": ticket.table_hash,
+                    },
+                )
+                raise map_exception_to_flight_error(exc) from exc
 
-        pinned: PinnedArtifact | None = None
-        active_incremented = False
-        handed_off = False
+            if not self._concurrency_semaphore.acquire(blocking=False):
+                _logger.warning(
+                    "Pod concurrency limit saturated; returning RESOURCE_EXHAUSTED",
+                    extra={
+                        "request_id": ticket.request_id,
+                        "tenant_id": ticket.tenant_id,
+                        "table_hash": ticket.table_hash,
+                    },
+                )
+                raise map_exception_to_flight_error(ConcurrencyLimitError())
 
-        try:
-            self._metrics.inc_active_queries()
-            active_incremented = True
+            pinned: PinnedArtifact | None = None
+            active_incremented = False
+            handed_off = False
+            exec_span: Span | None = None
 
-            pinned = self._await_hydration(resolved)
+            try:
+                self._metrics.inc_active_queries()
+                active_incremented = True
 
-            query_stream = self._process_manager.stream_query(
-                ticket.sql,
-                pinned.path,
-                ticket.table_alias,
-            )
-            owned_iter = _OwnedFlightBatchIterator(
-                query_stream=query_stream,
-                pinned=pinned,
-                metrics=self._metrics,
-                semaphore=self._concurrency_semaphore,
-                start_time=start_time,
-                request_id=ticket.request_id,
-                tenant_id=ticket.tenant_id,
-                table_hash=ticket.table_hash,
-            )
-            handed_off = True
-            return fl.GeneratorStream(query_stream.schema, owned_iter)
-        except QueryTimeoutError as exc:
-            self._metrics.inc_subprocess_recycle(RecycleReason.TIMEOUT.value)
-            raise map_exception_to_flight_error(exc) from exc
-        except WorkerCrashError as exc:
-            self._metrics.inc_subprocess_recycle(RecycleReason.CRASH.value)
-            raise map_exception_to_flight_error(exc) from exc
-        except Exception as exc:
-            raise map_exception_to_flight_error(exc) from exc
-        finally:
-            if not handed_off:
-                if active_incremented:
-                    self._metrics.dec_active_queries()
-                if pinned is not None:
-                    pinned.release()
-                self._concurrency_semaphore.release()
+                with start_span(
+                    "storage.get_or_hydrate",
+                    attributes={
+                        "request_id": ticket.request_id,
+                        "tenant_id": ticket.tenant_id,
+                        "table_hash": ticket.table_hash,
+                    },
+                ) as hydrate_span:
+                    pinned = self._await_hydration(resolved)
+                    hydrate_span.set_attribute("cache_state", pinned.cache_state)
+
+                exec_span = get_tracer().start_span(
+                    "duckdb.subprocess_execute",
+                    attributes=sanitize_span_attributes(
+                        {
+                            "request_id": ticket.request_id,
+                            "tenant_id": ticket.tenant_id,
+                            "table_hash": ticket.table_hash,
+                            "cache_state": pinned.cache_state,
+                        }
+                    ),
+                )
+                query_stream = self._process_manager.stream_query(
+                    ticket.sql,
+                    pinned.path,
+                    ticket.table_alias,
+                )
+                owned_iter = _OwnedFlightBatchIterator(
+                    query_stream=query_stream,
+                    pinned=pinned,
+                    metrics=self._metrics,
+                    semaphore=self._concurrency_semaphore,
+                    start_time=start_time,
+                    request_id=ticket.request_id,
+                    tenant_id=ticket.tenant_id,
+                    table_hash=ticket.table_hash,
+                    exec_span=exec_span,
+                    trace_id=get_current_trace_id(),
+                )
+                handed_off = True
+                return fl.GeneratorStream(query_stream.schema, owned_iter)
+            except QueryTimeoutError as exc:
+                self._metrics.inc_subprocess_recycle(RecycleReason.TIMEOUT.value)
+                if exec_span is not None:
+                    record_sanitized_exception(exec_span, exc)
+                raise map_exception_to_flight_error(exc) from exc
+            except WorkerCrashError as exc:
+                self._metrics.inc_subprocess_recycle(exc.reason.value)
+                if exec_span is not None:
+                    record_sanitized_exception(exec_span, exc)
+                raise map_exception_to_flight_error(exc) from exc
+            except Exception as exc:
+                if exec_span is not None:
+                    record_sanitized_exception(exec_span, exc)
+                raise map_exception_to_flight_error(exc) from exc
+            finally:
+                if not handed_off:
+                    if exec_span is not None:
+                        exec_span.end()
+                    if active_incremented:
+                        self._metrics.dec_active_queries()
+                    if pinned is not None:
+                        pinned.release()
+                    self._concurrency_semaphore.release()
 
     def handle_cache_warm(self, body: bytes) -> bytes:
         """Idempotently hydrate a tenant-validated Parquet artifact into the NVMe cache."""
-        try:
-            req = CacheWarmRequest.model_validate_json(body)
-        except (PydanticValidationError, ValueError) as exc:
-            raise map_exception_to_flight_error(exc) from exc
+        with start_span("flight.do_action.cache_warm") as span:
+            try:
+                req = CacheWarmRequest.model_validate_json(body)
+            except (PydanticValidationError, ValueError) as exc:
+                raise map_exception_to_flight_error(exc) from exc
 
-        pinned: PinnedArtifact | None = None
-        try:
-            pinned = self._hydrate_sync(
-                tenant_id=req.tenant_id,
-                table_hash=req.table_hash,
-                s3_bucket=req.s3_bucket,
-                s3_key=req.s3_key,
+            span.set_attributes(
+                sanitize_span_attributes(
+                    {
+                        "tenant_id": req.tenant_id,
+                        "table_hash": req.table_hash,
+                    }
+                )
             )
-            resp = CacheWarmResponse(status="warmed", bytes=pinned.size_bytes)
-            _logger.info(
-                "Warmed Parquet artifact in Tier-1 cache",
-                extra={
-                    "tenant_id": req.tenant_id,
-                    "table_hash": req.table_hash,
-                    "cache_state": pinned.cache_state,
-                    "extra_fields": {"bytes": pinned.size_bytes},
-                },
-            )
-            return json.dumps(resp.model_dump()).encode("utf-8")
-        except Exception as exc:
-            raise map_exception_to_flight_error(exc) from exc
-        finally:
-            if pinned is not None:
-                pinned.release()
+            pinned: PinnedArtifact | None = None
+            try:
+                pinned = self._hydrate_sync(
+                    tenant_id=req.tenant_id,
+                    table_hash=req.table_hash,
+                    s3_bucket=req.s3_bucket,
+                    s3_key=req.s3_key,
+                )
+                span.set_attribute("cache_state", pinned.cache_state)
+                resp = CacheWarmResponse(status="warmed", bytes=pinned.size_bytes)
+                _logger.info(
+                    "Warmed Parquet artifact in Tier-1 cache",
+                    extra={
+                        "tenant_id": req.tenant_id,
+                        "table_hash": req.table_hash,
+                        "cache_state": pinned.cache_state,
+                        "extra_fields": {"bytes": pinned.size_bytes},
+                    },
+                )
+                return json.dumps(resp.model_dump()).encode("utf-8")
+            except Exception as exc:
+                raise map_exception_to_flight_error(exc) from exc
+            finally:
+                if pinned is not None:
+                    pinned.release()
 
     def handle_health_check(self) -> bytes:
         """Return worker pool health status for Flight DoAction('health_check')."""
-        healthy = self._process_manager.is_healthy()
-        resp = HealthCheckResponse(
-            status="ok" if healthy else "degraded",
-            active_workers=self._settings.POOL_SIZE if healthy else 0,
-        )
-        return json.dumps(resp.model_dump()).encode("utf-8")
+        with start_span("flight.do_action.health_check"):
+            healthy = self._process_manager.is_healthy()
+            resp = HealthCheckResponse(
+                status="ok" if healthy else "degraded",
+                active_workers=self._settings.POOL_SIZE if healthy else 0,
+            )
+            return json.dumps(resp.model_dump()).encode("utf-8")

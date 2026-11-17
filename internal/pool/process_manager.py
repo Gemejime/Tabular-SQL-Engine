@@ -5,7 +5,8 @@ from __future__ import annotations
 import contextlib
 import io
 import os
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
 from multiprocessing.connection import Client, Listener
 from pathlib import Path
@@ -21,8 +22,13 @@ from internal.pool.circuit_breaker import (
     RecycleReason,
     WorkerCrashError,
 )
-from internal.pool.worker_task import run_sandboxed_query_task
+from internal.pool.worker_task import (
+    init_worker_process,
+    ping_worker,
+    run_sandboxed_query_task,
+)
 from internal.telemetry.logging import get_logger
+from internal.telemetry.metrics import MetricsRegistry
 
 _logger = get_logger("internal.pool.process_manager")
 
@@ -77,8 +83,9 @@ class QueryStream:
         stream_reader: pa.ipc.RecordBatchStreamReader,
         conn: _IpcRecvConn,
         listener: Listener,
-        future: Future[int],
+        future: Future[tuple[int, int]],
         circuit_breaker: CircuitBreaker,
+        on_task_complete: Callable[[int], None] | None = None,
     ) -> None:
         self.schema = schema
         self._stream_reader = stream_reader
@@ -86,6 +93,7 @@ class QueryStream:
         self._listener = listener
         self._future = future
         self._circuit_breaker = circuit_breaker
+        self._on_task_complete = on_task_complete
         self._closed = False
         self._iterated = False
 
@@ -114,7 +122,13 @@ class QueryStream:
             except (EOFError, OSError, pa.ArrowInvalid) as exc:
                 self._circuit_breaker.await_result(self._future)
                 raise WorkerCrashError(f"Arrow IPC stream interrupted: {exc}") from exc
-            self._circuit_breaker.await_result(self._future)
+            result = self._circuit_breaker.await_result(self._future)
+            if (
+                self._on_task_complete is not None
+                and isinstance(result, tuple)
+                and len(result) == 2
+            ):
+                self._on_task_complete(int(result[1]))
         finally:
             self.close()
 
@@ -122,23 +136,70 @@ class QueryStream:
 class ProcessManager:
     """Supervises disposable DuckDB worker subprocesses via pebble.ProcessPool."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, metrics: MetricsRegistry | None = None) -> None:
         self._settings = settings
+        self._metrics = metrics
         self._circuit_breaker = CircuitBreaker(timeout_seconds=settings.QUERY_TIMEOUT_SECONDS)
         self._pool: ProcessPool | None = None
+        self._task_counts_lock = threading.Lock()
+        self._pid_task_counts: dict[int, int] = {}
 
     @property
     def circuit_breaker(self) -> CircuitBreaker:
         """Return the circuit breaker instance."""
         return self._circuit_breaker
 
+    def _record_worker_task_completion(self, worker_pid: int) -> None:
+        """Track completed tasks per worker PID and emit TASK_LIMIT recycle events."""
+        recycled = False
+        with self._task_counts_lock:
+            count = self._pid_task_counts.get(worker_pid, 0) + 1
+            if count >= self._settings.MAX_TASKS_PER_CHILD:
+                self._pid_task_counts.pop(worker_pid, None)
+                recycled = True
+            else:
+                self._pid_task_counts[worker_pid] = count
+                if len(self._pid_task_counts) > self._settings.POOL_SIZE * 4:
+                    oldest_pid = next(iter(self._pid_task_counts))
+                    self._pid_task_counts.pop(oldest_pid, None)
+
+        if recycled:
+            self._circuit_breaker.record_recycle(RecycleReason.TASK_LIMIT)
+            if self._metrics is not None:
+                self._metrics.inc_subprocess_recycle(RecycleReason.TASK_LIMIT.value)
+            _logger.info(
+                "Worker subprocess reached MAX_TASKS_PER_CHILD and was recycled",
+                extra={
+                    "reason": RecycleReason.TASK_LIMIT.value,
+                    "worker_pid": worker_pid,
+                    "extra_fields": {"max_tasks_per_child": self._settings.MAX_TASKS_PER_CHILD},
+                },
+            )
+
     def start(self) -> None:
-        """Initialize the disposable subprocess pool."""
+        """Initialize and pre-warm the disposable subprocess pool."""
         if self._pool is None:
             self._pool = ProcessPool(
                 max_workers=self._settings.POOL_SIZE,
                 max_tasks=self._settings.MAX_TASKS_PER_CHILD,
+                initializer=init_worker_process,
+                initargs=(self._settings.WORKER_PROCESS_RLIMIT_BYTES,),
             )
+            if self._settings.MAX_TASKS_PER_CHILD > 1:
+                warmup_timeout = max(30.0, self._settings.QUERY_TIMEOUT_SECONDS * 4.0)
+                warmup_futures = [
+                    self._pool.schedule(ping_worker, timeout=warmup_timeout)
+                    for _ in range(self._settings.POOL_SIZE)
+                ]
+                for fut in warmup_futures:
+                    try:
+                        worker_pid = int(fut.result(timeout=warmup_timeout))
+                        self._record_worker_task_completion(worker_pid)
+                    except Exception as exc:
+                        _logger.warning(
+                            "Worker warm-up task did not complete cleanly",
+                            extra={"extra_fields": {"error_type": type(exc).__name__}},
+                        )
             _logger.info(
                 "Started disposable DuckDB worker pool",
                 extra={
@@ -183,7 +244,7 @@ class ProcessManager:
         authkey = os.urandom(32)
         listener = Listener(authkey=authkey)
         conn: _IpcRecvConn | None = None
-        future: Future[int] = self._pool.schedule(
+        future: Future[tuple[int, int]] = self._pool.schedule(
             run_sandboxed_query_task,
             args=(
                 sql,
@@ -232,7 +293,7 @@ class ProcessManager:
             with contextlib.suppress(OSError):
                 listener.close()
 
-        def _on_future_done(_done_future: Future[int]) -> None:
+        def _on_future_done(_done_future: Future[tuple[int, int]]) -> None:
             if not accept_done.is_set() and (
                 _done_future.cancelled() or _done_future.exception() is not None
             ):
@@ -285,6 +346,7 @@ class ProcessManager:
                 listener=listener,
                 future=future,
                 circuit_breaker=self._circuit_breaker,
+                on_task_complete=self._record_worker_task_completion,
             )
         except (QueryTimeoutError, WorkerCrashError):
             raise
