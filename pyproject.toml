@@ -96,3 +96,6 @@ testpaths = ["test"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = "-ra"
+markers = [
+    "soak: Extended endurance and SLO soak tests (opt-in via RUN_SOAK_TESTS=1 or -m soak)",
+]

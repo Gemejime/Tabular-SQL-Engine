@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import random
+import time
 from pathlib import Path
 
+import duckdb
+import pyarrow.flight as fl
 import pytest
 
+from internal.config.settings import Settings
+from internal.flight.handlers import FlightHandlers
+from internal.pool.process_manager import ProcessManager
+from internal.sandbox.security_profile import SandboxProfile, apply_sandbox_lock
+from internal.storage.cache_manager import CacheManager
+from internal.storage.s3_streamer import S3Streamer
+from internal.storage.table_resolver import TableResolver
 from internal.telemetry.logging import JsonLogFormatter, redact_mapping, redact_text
+from internal.telemetry.metrics import MetricsRegistry
 from internal.validator import (
     ASTSyntaxError,
     ASTValidator,
@@ -22,7 +35,10 @@ from test.fixtures.sample_data import write_sample_parquet
 
 @pytest.fixture(scope="module")
 def validator() -> ASTValidator:
-    return ASTValidator(max_sql_length=8192, max_joins=5)
+    instance = ASTValidator(max_sql_length=8192, max_joins=5)
+    # Warm up sqlglot DuckDB parser/caches before steady-state latency checks.
+    instance.validate("SELECT COUNT(*) FROM tbl", allowed_table_alias="tbl")
+    return instance
 
 
 @pytest.mark.parametrize(
@@ -130,3 +146,147 @@ def test_structured_logging_redacts_secrets_and_presigned_urls() -> None:
     parsed = json.loads(formatter.format(record))
     assert parsed["level"] == "INFO"
     assert "abc123xyz" not in parsed["message"]
+
+
+def _generate_fuzz_payloads(seed: int = 42, count: int = 120) -> list[str]:
+    """Generate deterministic obfuscated SQL injection and AST bypass payloads."""
+    rng = random.Random(seed)  # noqa: S311
+    banned_calls = [
+        "read_parquet('/etc/passwd')",
+        "read_csv('/etc/passwd')",
+        "read_csv_auto('/tmp/secret.csv')",
+        "scan_parquet('s3://evil-bucket/key.parquet')",
+        "glob('/var/run/*')",
+        "getenv('AWS_SECRET_ACCESS_KEY')",
+        "current_setting('memory_limit')",
+        "duckdb_tables()",
+        "duckdb_settings()",
+        "httpfs_get('https://evil.example.com')",
+        "write_csv(tbl, '/tmp/out.csv')",
+        "copy(tbl)",
+    ]
+    wrappers = [
+        lambda call: f"WITH cte AS (SELECT {call} AS x FROM tbl) SELECT x FROM cte",
+        lambda call: f"SELECT COUNT(*) FROM tbl UNION ALL SELECT 1 FROM {call}",
+        lambda call: f"SELECT COUNT(*) FROM tbl INTERSECT SELECT 1 WHERE {call} IS NOT NULL",
+        lambda call: f"SELECT COUNT(*) FROM tbl EXCEPT SELECT 1 FROM {call}",
+        lambda call: f"SELECT (SELECT {call} FROM tbl LIMIT 1) AS leaked FROM tbl",
+        lambda call: f"SELECT * FROM (SELECT * FROM {call}) sub",
+        lambda call: f"SELECT /* bypass */ COUNT(*) FROM tbl; {call}",
+        lambda call: f"SELECT * FROM '/tmp/{rng.randint(1, 999)}.parquet'",
+        lambda call: f"SELECT * FROM tbl WHERE id = {'(' * 12}{call}{')' * 12}",
+    ]
+    comments = ["/*+ hint */ ", "/* fuzz */\n", "-- line comment\n", "  \t\n "]
+
+    payloads: list[str] = []
+    for i in range(count):
+        call = banned_calls[i % len(banned_calls)]
+        if rng.random() < 0.5:
+            call = "".join(c.upper() if rng.random() < 0.5 else c.lower() for c in call)
+        prefix = rng.choice(comments)
+        wrapper = wrappers[i % len(wrappers)]
+        payloads.append(f"{prefix}{wrapper(call)}")
+    return payloads
+
+
+def test_deterministic_sql_fuzzing_blocks_all_bypasses_within_2ms(
+    validator: ASTValidator,
+) -> None:
+    payloads = _generate_fuzz_payloads(seed=42, count=120)
+    total_ms = 0.0
+    for payload in payloads:
+        start = time.perf_counter()
+        with pytest.raises(ValidationError):
+            validator.validate(payload, allowed_table_alias="tbl")
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        total_ms += elapsed_ms
+
+    avg_ms = total_ms / len(payloads)
+    assert avg_ms <= 2.0, f"Average AST validation latency {avg_ms:.3f}ms exceeded 2.0ms budget"
+
+
+def test_flight_handlers_increment_ast_rejection_metric_on_fuzz_payloads(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        CACHE_DIR=tmp_path / "cache",
+        S3_BUCKET_ALLOWLIST=["rag-tabular-artifacts"],
+        POOL_SIZE=1,
+        MAX_CONCURRENT_QUERIES=2,
+    )
+    metrics = MetricsRegistry()
+    ast_validator = ASTValidator(max_sql_length=8192, max_joins=5)
+    table_resolver = TableResolver(settings.S3_BUCKET_ALLOWLIST)
+    cache_manager = CacheManager(tmp_path / "cache", max_bytes=1024 * 1024, metrics=metrics)
+    s3_streamer = S3Streamer(client=object())
+    process_manager = ProcessManager(settings, metrics=metrics)
+    loop = asyncio.new_event_loop()
+    try:
+        handlers = FlightHandlers(
+            settings=settings,
+            ast_validator=ast_validator,
+            table_resolver=table_resolver,
+            cache_manager=cache_manager,
+            s3_streamer=s3_streamer,
+            process_manager=process_manager,
+            hydration_loop=loop,
+            metrics=metrics,
+        )
+        payloads = _generate_fuzz_payloads(seed=7, count=25)
+        table_hash = "a" * 64
+        for idx, sql in enumerate(payloads):
+            ticket_bytes = json.dumps(
+                {
+                    "request_id": f"req-fuzz-{idx}",
+                    "tenant_id": "tenant-fuzz",
+                    "sql": sql,
+                    "table_alias": "tbl",
+                    "table_hash": table_hash,
+                    "s3_bucket": "rag-tabular-artifacts",
+                    "s3_key": f"artifacts/tenant-fuzz/{table_hash}.parquet",
+                }
+            ).encode("utf-8")
+            with pytest.raises(fl.FlightError):
+                handlers.handle_do_get(ticket_bytes)
+
+        rendered = metrics.render_prometheus().decode("utf-8")
+        assert "tabular_worker_ast_rejections_total{" in rendered
+        total_rejections = sum(
+            sample.value
+            for metric in metrics.registry.collect()
+            if metric.name == "tabular_worker_ast_rejections"
+            for sample in metric.samples
+            if sample.name == "tabular_worker_ast_rejections_total"
+        )
+        assert total_rejections == len(payloads)
+    finally:
+        loop.close()
+
+
+@pytest.mark.parametrize(
+    "escape_sql",
+    [
+        "SELECT * FROM read_parquet('/etc/passwd')",
+        "SELECT * FROM read_csv('/etc/passwd')",
+        "PRAGMA memory_limit='10GB'",
+        "SET memory_limit = '10GB'",
+        "ATTACH '/tmp/other.db' AS extra_db",
+        "DETACH memory",
+        "COPY tbl TO '/tmp/exfil.parquet'",
+        "INSTALL httpfs",
+        "LOAD httpfs",
+        "SELECT getenv('PATH')",
+    ],
+)
+def test_duckdb_sandbox_lock_blocks_direct_engine_escapes(
+    tmp_path: Path,
+    escape_sql: str,
+) -> None:
+    parquet_path = write_sample_parquet(tmp_path / "sandbox.parquet", num_rows=10)
+    conn = duckdb.connect(":memory:")
+    try:
+        apply_sandbox_lock(conn, parquet_path, "tbl", SandboxProfile())
+        with pytest.raises(duckdb.Error):
+            conn.execute(escape_sql).fetchall()
+    finally:
+        conn.close()
