@@ -49,12 +49,17 @@ def init_tracing(settings: Settings) -> TracerProvider | None:
     if not settings.OTEL_ENABLED:
         return None
 
+    if _ACTIVE_PROVIDER is not None:
+        _ACTIVE_PROVIDER.shutdown()
+        _ACTIVE_PROVIDER = None
+
     resource = Resource.create({"service.name": settings.OTEL_SERVICE_NAME})
     provider = TracerProvider(resource=resource)
     if settings.OTEL_EXPORTER_ENDPOINT:
         exporter = OTLPSpanExporter(endpoint=settings.OTEL_EXPORTER_ENDPOINT)
         provider.add_span_processor(BatchSpanProcessor(exporter))
-    trace.set_tracer_provider(provider)
+    if isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider):
+        trace.set_tracer_provider(provider)
     _ACTIVE_PROVIDER = provider
     _logger.info(
         "Initialized OpenTelemetry tracing",
@@ -77,7 +82,9 @@ def shutdown_tracing() -> None:
 
 
 def get_tracer(name: str = "rag-tabular-analytics-worker") -> trace.Tracer:
-    """Return an OpenTelemetry tracer from the active global provider."""
+    """Return an OpenTelemetry tracer from the currently owned provider or global fallback."""
+    if _ACTIVE_PROVIDER is not None:
+        return _ACTIVE_PROVIDER.get_tracer(name)
     return trace.get_tracer(name)
 
 
@@ -110,10 +117,16 @@ def sanitize_span_attributes(
 
 
 def record_sanitized_exception(span: Span, exc: BaseException) -> None:
-    """Record exception type and redacted message on a span without leaking raw SQL/secrets."""
-    span.set_status(Status(StatusCode.ERROR, redact_text(type(exc).__name__)))
-    span.set_attribute("exception.type", type(exc).__name__)
-    span.set_attribute("exception.message", redact_text(str(exc)))
+    """Record allowlisted error-type and rule metadata without leaking raw SQL/secrets."""
+    exc_type = type(exc).__name__
+    span.set_status(Status(StatusCode.ERROR, exc_type))
+    span.set_attribute("exception.type", exc_type)
+    rule = getattr(exc, "rule", None)
+    if isinstance(rule, str) and rule:
+        span.set_attribute("error.rule", rule)
+        span.set_attribute("exception.message", f"{exc_type}:{rule}")
+    else:
+        span.set_attribute("exception.message", exc_type)
 
 
 def extract_trace_context(headers: Mapping[str, Any] | None) -> Context:
@@ -144,7 +157,13 @@ def start_span(
     """Start an OpenTelemetry span with sanitized attributes and safe error recording."""
     tracer = get_tracer(tracer_name)
     safe_attrs = sanitize_span_attributes(attributes)
-    with tracer.start_as_current_span(name, context=context, attributes=safe_attrs) as span:
+    with tracer.start_as_current_span(
+        name,
+        context=context,
+        attributes=safe_attrs,
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
         try:
             yield span
         except BaseException as exc:

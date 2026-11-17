@@ -163,7 +163,7 @@ class ASTValidator:
         child: exp.Expression = table
         curr = table.parent
         while curr is not None:
-            with_clause = curr.args.get("with_")
+            with_clause = curr.args.get("with_") or curr.args.get("with")
             if isinstance(with_clause, exp.With):
                 is_recursive = bool(with_clause.args.get("recursive"))
                 for cte in with_clause.expressions:

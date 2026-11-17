@@ -262,6 +262,7 @@ class ProcessManager:
 
         accept_done = threading.Event()
         aborted = threading.Event()
+        wake_lock = threading.Lock()
         accepted_conn: list[_IpcRecvConn | None] = [None]
         accept_error: list[BaseException | None] = [None]
 
@@ -274,7 +275,8 @@ class ProcessManager:
                     return
                 accepted_conn[0] = incoming
             except BaseException as exc:
-                accept_error[0] = exc
+                if not aborted.is_set():
+                    accept_error[0] = exc
             finally:
                 accept_done.set()
 
@@ -286,12 +288,28 @@ class ProcessManager:
         accept_thread.start()
 
         def _wake_listener() -> None:
-            aborted.set()
-            with contextlib.suppress(OSError, EOFError, Exception):
-                wake_conn = Client(listener.address, authkey=authkey)
-                wake_conn.close()
-            with contextlib.suppress(OSError):
-                listener.close()
+            with wake_lock:
+                aborted.set()
+                if accept_done.is_set():
+                    with contextlib.suppress(OSError):
+                        listener.close()
+                    return
+
+                def _connect_wake() -> None:
+                    with contextlib.suppress(OSError, EOFError, Exception):
+                        wake_conn = Client(listener.address)
+                        wake_conn.close()
+
+                wake_thread = threading.Thread(
+                    target=_connect_wake,
+                    name="ipc-listener-wake",
+                    daemon=True,
+                )
+                wake_thread.start()
+                accept_done.wait(timeout=0.5)
+                wake_thread.join(timeout=0.2)
+                with contextlib.suppress(OSError):
+                    listener.close()
 
         def _on_future_done(_done_future: Future[tuple[int, int]]) -> None:
             if not accept_done.is_set() and (

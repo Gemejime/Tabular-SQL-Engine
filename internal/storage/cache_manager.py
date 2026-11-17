@@ -255,8 +255,7 @@ class CacheManager:
     ) -> None:
         """Evict unpinned LRU entries if needed and atomically rename tmp_path to dest_path."""
         with self._lock:
-            if reserved_bytes > 0:
-                self._reserved_bytes = max(0, self._reserved_bytes - reserved_bytes)
+            other_reserved = max(0, self._reserved_bytes - reserved_bytes)
 
             if size_bytes > self._max_bytes:
                 with contextlib.suppress(OSError):
@@ -278,13 +277,13 @@ class CacheManager:
                     )
 
             for candidate_key, candidate_entry in list(self._entries.items()):
-                if self._total_bytes + self._reserved_bytes + size_bytes <= self._max_bytes:
+                if self._total_bytes + other_reserved + size_bytes <= self._max_bytes:
                     break
                 if candidate_entry.refcount > 0 or candidate_entry.pending_evict:
                     continue
                 self._remove_entry_locked(candidate_key, unlink_file=True)
 
-            if self._total_bytes + self._reserved_bytes + size_bytes > self._max_bytes:
+            if self._total_bytes + other_reserved + size_bytes > self._max_bytes:
                 with contextlib.suppress(OSError):
                     tmp_path.unlink(missing_ok=True)
                 raise CacheCapacityError(
@@ -358,7 +357,6 @@ class CacheManager:
 
             tmp_path: Path | None = None
             reserved_bytes = 0
-            reservation_released = False
 
             def _reserve_chunk(nbytes: int) -> None:
                 nonlocal reserved_bytes
@@ -406,16 +404,11 @@ class CacheManager:
                     size_bytes,
                     reserved_bytes=reserved_bytes,
                 )
-                reservation_released = True
                 pinned = self._pin_after_hydration(key)
                 if not leader_fut.done():
                     leader_fut.set_result((dest_path, size_bytes))
                 return pinned
             except BaseException as exc:
-                if not reservation_released and reserved_bytes > 0:
-                    with self._lock:
-                        self._reserved_bytes = max(0, self._reserved_bytes - reserved_bytes)
-                    reservation_released = True
                 if tmp_path is not None:
                     with contextlib.suppress(OSError):
                         tmp_path.unlink(missing_ok=True)
@@ -425,4 +418,7 @@ class CacheManager:
                     leader_fut.exception()
                 raise
             finally:
+                if reserved_bytes > 0:
+                    with self._lock:
+                        self._reserved_bytes = max(0, self._reserved_bytes - reserved_bytes)
                 self._inflight.pop(key, None)

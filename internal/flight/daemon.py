@@ -202,13 +202,30 @@ class WorkerDaemon:
             self.ops_server.close()
             self.ops_server = None
 
+        first_exc: BaseException | None = None
         if self.hydration_thread.loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                self.s3_streamer.close(),
-                self.hydration_thread.loop,
-            ).result(timeout=5.0)
-        self.hydration_thread.stop()
-        shutdown_tracing()
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self.s3_streamer.close(),
+                    self.hydration_thread.loop,
+                ).result(timeout=5.0)
+            except BaseException as exc:
+                first_exc = exc
+
+        try:
+            self.hydration_thread.stop()
+        except BaseException as exc:
+            if first_exc is None:
+                first_exc = exc
+
+        try:
+            shutdown_tracing()
+        except BaseException as exc:
+            if first_exc is None:
+                first_exc = exc
+
+        if first_exc is not None:
+            raise first_exc
         _logger.info("Shutdown complete")
 
     def run_forever(self) -> None:
