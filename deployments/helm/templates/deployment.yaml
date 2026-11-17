@@ -1,3 +1,6 @@
+{{- if and .Values.env.TABULAR_WORKER_CACHE_DIR (ne .Values.env.TABULAR_WORKER_CACHE_DIR .Values.cache.mountPath) -}}
+{{- fail (printf "env.TABULAR_WORKER_CACHE_DIR (%s) must match cache.mountPath (%s)" .Values.env.TABULAR_WORKER_CACHE_DIR .Values.cache.mountPath) -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -37,10 +40,10 @@ spec:
               {{- toYaml .Values.securityContext.capabilities | nindent 14 }}
           ports:
             - name: grpc
-              containerPort: {{ .Values.service.grpcPort }}
+              containerPort: {{ default 8815 .Values.env.TABULAR_WORKER_FLIGHT_PORT | int }}
               protocol: TCP
             - name: http
-              containerPort: {{ .Values.service.httpPort }}
+              containerPort: {{ default 8080 .Values.env.TABULAR_WORKER_HTTP_PORT | int }}
               protocol: TCP
           env:
             {{- if .Values.jemalloc.enabled }}

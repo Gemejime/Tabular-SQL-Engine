@@ -12,7 +12,7 @@ spec:
       interval: 30s
       count: 4
       failureLimit: 1
-      successCondition: "len(result) == 0 || result[0] <= 0.12"
+      successCondition: "len(result) > 0 && result[0] <= 0.12"
       provider:
         prometheus:
           address: "{{args.prometheus-url}}"
@@ -22,7 +22,7 @@ spec:
       interval: 30s
       count: 4
       failureLimit: 1
-      successCondition: "len(result) == 0 || result[0] <= 0.05"
+      successCondition: "len(result) > 0 && result[0] <= 0.05"
       provider:
         prometheus:
           address: "{{args.prometheus-url}}"
@@ -32,7 +32,7 @@ spec:
       interval: 30s
       count: 4
       failureLimit: 2
-      successCondition: "len(result) == 0 || result[0] >= 0.80"
+      successCondition: "len(result) > 0 && result[0] >= 0.80"
       provider:
         prometheus:
           address: "{{args.prometheus-url}}"
@@ -41,7 +41,7 @@ spec:
     - name: active-queries
       interval: 30s
       count: 4
-      successCondition: "len(result) == 0 || result[0] >= 0"
+      successCondition: "len(result) > 0 && result[0] >= 0"
       provider:
         prometheus:
           address: "{{args.prometheus-url}}"

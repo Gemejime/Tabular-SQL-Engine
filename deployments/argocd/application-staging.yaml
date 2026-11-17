@@ -8,7 +8,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/org/rag-tabular-analytics-worker.git
+    repoURL: https://github.com/Gemejime/Tabular-SQL-Engine.git
     targetRevision: HEAD
     path: deployments/helm
     helm:

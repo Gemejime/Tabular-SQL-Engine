@@ -10,7 +10,7 @@ spec:
     # Production deployments promote pinned release tags via progressive Argo Rollouts canary.
   source:
     repoURL: https://github.com/org/rag-tabular-analytics-worker.git
-    targetRevision: main
+    targetRevision: v0.1.0
     path: deployments/helm
     helm:
       releaseName: rag-tabular-analytics-worker

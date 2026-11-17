@@ -18,5 +18,5 @@ spec:
         serverAddress: {{ .Values.keda.prometheus.serverAddress }}
         metricName: tabular_worker_active_queries
         threshold: {{ .Values.keda.prometheus.threshold | quote }}
-        query: avg(tabular_worker_active_queries{namespace="{{ .Release.Namespace }}",pod=~"{{ include "rag-tabular-analytics-worker.fullname" . }}-.*"})
+        query: sum(tabular_worker_active_queries{namespace="{{ .Release.Namespace }}",pod=~"{{ include "rag-tabular-analytics-worker.fullname" . }}-.*"})
 {{- end }}

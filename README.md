@@ -50,7 +50,7 @@ RUN_SOAK_TESTS=1 pytest -v -m soak test/chaos
 
 ```bash
 docker build -f deployments/docker/Dockerfile -t rag-tabular-analytics-worker:0.1.0 .
-docker run --rm -p 8815:8815 -p 8080:8080 --read-only --tmpfs /tmp:rw,size=256m rag-tabular-analytics-worker:0.1.0
+docker run --rm -p 8815:8815 -p 8080:8080 --read-only --tmpfs /var/cache/tabular-worker:rw,noexec,nosuid,uid=10001,gid=10001,size=1g --tmpfs /tmp:rw,size=256m rag-tabular-analytics-worker:0.1.0
 ```
 
 ### Helm & ArgoCD Progressive Canary Rollout
