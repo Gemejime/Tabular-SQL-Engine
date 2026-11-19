@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import math
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated, Any
 
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 GIB_BYTES = 1024 * 1024 * 1024
 MIB_BYTES = 1024 * 1024
 DEFAULT_DUCKDB_TOTAL_MEMORY_BYTES = int(2.5 * GIB_BYTES)  # 2,684,354,560 bytes (2.5 GiB)
 DEFAULT_CACHE_MAX_BYTES = 10 * GIB_BYTES  # 10 GiB NVMe emptyDir ceiling (ADR-002)
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
@@ -20,6 +23,8 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="TABULAR_WORKER_",
+        env_file=(_PROJECT_ROOT / ".env", ".env"),
+        env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
     )
@@ -56,7 +61,7 @@ class Settings(BaseSettings):
     CACHE_MAX_BYTES: int = Field(default=DEFAULT_CACHE_MAX_BYTES, ge=MIB_BYTES)
 
     # S3 VPC Endpoint Streaming & Tenant Allowlist
-    S3_BUCKET_ALLOWLIST: list[str] = Field(default_factory=list)
+    S3_BUCKET_ALLOWLIST: Annotated[list[str], NoDecode] = Field(default_factory=list)
     S3_ENDPOINT_URL: str | None = Field(default=None)
     S3_REGION: str = Field(default="us-east-1")
     S3_CHUNK_SIZE_BYTES: int = Field(default=8 * MIB_BYTES, ge=64 * 1024, le=128 * MIB_BYTES)
@@ -72,6 +77,39 @@ class Settings(BaseSettings):
     OTEL_ENABLED: bool = Field(default=False)
     OTEL_EXPORTER_ENDPOINT: str | None = Field(default=None)
     OTEL_SERVICE_NAME: str = Field(default="rag-tabular-analytics-worker")
+
+    @field_validator(
+        "S3_ENDPOINT_URL",
+        "WORKER_PROCESS_RLIMIT_BYTES",
+        "OTEL_EXPORTER_ENDPOINT",
+        mode="before",
+    )
+    @classmethod
+    def _empty_str_to_none(cls, value: Any) -> Any:
+        """Treat blank .env values for optional settings as None."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("S3_BUCKET_ALLOWLIST", mode="before")
+    @classmethod
+    def _parse_bucket_allowlist(cls, value: Any) -> list[str]:
+        """Parse S3_BUCKET_ALLOWLIST from JSON array, comma-separated string, or list."""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                parsed = json.loads(stripped)
+                if not isinstance(parsed, list):
+                    raise ValueError("S3_BUCKET_ALLOWLIST JSON value must be a list of strings")
+                return [str(item).strip() for item in parsed if str(item).strip()]
+            return [item.strip() for item in stripped.split(",") if item.strip()]
+        raise ValueError("S3_BUCKET_ALLOWLIST must be a list or string")
 
     @model_validator(mode="after")
     def _validate_worker_memory_budget(self) -> Settings:

@@ -119,16 +119,50 @@ class JsonLogFormatter(logging.Formatter):
         return json.dumps(payload, default=str, separators=(",", ":"))
 
 
-def get_logger(name: str, level: str = "INFO") -> logging.Logger:
+_DEFAULT_LOG_LEVEL: str = "INFO"
+_DEFAULT_SERVICE_NAME: str = "rag-tabular-analytics-worker"
+
+
+def _resolve_log_level(level: str) -> int:
+    """Resolve a case-insensitive log level string to a stdlib logging constant."""
+    resolved = getattr(logging, level.upper(), None)
+    return resolved if isinstance(resolved, int) else logging.INFO
+
+
+def configure_logging(level: str = "INFO", service_name: str | None = None) -> None:
+    """Apply runtime log level and service name to all worker loggers."""
+    global _DEFAULT_LOG_LEVEL, _DEFAULT_SERVICE_NAME
+    _DEFAULT_LOG_LEVEL = level.upper()
+    if service_name:
+        _DEFAULT_SERVICE_NAME = service_name
+
+    numeric_level = _resolve_log_level(level)
+    for name, logger_obj in list(logging.Logger.manager.loggerDict.items()):
+        if not isinstance(logger_obj, logging.Logger):
+            continue
+        if (
+            name == "internal"
+            or name.startswith("internal.")
+            or name == "cmd"
+            or name.startswith("cmd.")
+        ):
+            logger_obj.setLevel(numeric_level)
+            if service_name:
+                for handler in logger_obj.handlers:
+                    if isinstance(handler.formatter, JsonLogFormatter):
+                        handler.formatter._service_name = service_name
+
+
+def get_logger(name: str, level: str | None = None) -> logging.Logger:
     """Return a configured structured JSON logger without duplicate stream handlers."""
     logger = logging.getLogger(name)
-    numeric_level = getattr(logging, level.upper(), logging.INFO)
+    numeric_level = _resolve_log_level(level or _DEFAULT_LOG_LEVEL)
     logger.setLevel(numeric_level)
     logger.propagate = False
 
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(JsonLogFormatter())
+        handler.setFormatter(JsonLogFormatter(service_name=_DEFAULT_SERVICE_NAME))
         logger.addHandler(handler)
 
     return logger

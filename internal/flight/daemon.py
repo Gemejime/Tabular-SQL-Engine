@@ -16,7 +16,7 @@ from internal.pool.process_manager import ProcessManager
 from internal.storage.cache_manager import CacheManager
 from internal.storage.s3_streamer import S3Streamer
 from internal.storage.table_resolver import TableResolver
-from internal.telemetry.logging import get_logger
+from internal.telemetry.logging import configure_logging, get_logger
 from internal.telemetry.metrics import MetricsRegistry
 from internal.telemetry.tracing import (
     FlightTracingMiddlewareFactory,
@@ -84,6 +84,10 @@ class WorkerDaemon:
         s3_client: Any | None = None,
     ) -> None:
         self.settings = settings or get_settings()
+        configure_logging(
+            level=self.settings.LOG_LEVEL,
+            service_name=self.settings.SERVICE_NAME,
+        )
         self.metrics = MetricsRegistry()
         self.hydration_thread = HydrationLoopThread()
         self.ast_validator = ASTValidator(
