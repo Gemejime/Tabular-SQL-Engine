@@ -11,7 +11,13 @@ from typing import Any
 
 import yaml
 
-SENSITIVE_KEY_MARKERS: tuple[str, ...] = ("PASSWORD", "SECRET", "TOKEN", "KEY")
+SENSITIVE_KEY_MARKERS: tuple[str, ...] = (
+    "PASSWORD",
+    "SECRET",
+    "TOKEN",
+    "KEY",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+)
 TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+:")
 
 
@@ -33,9 +39,28 @@ def is_sensitive_key(key: str) -> bool:
 
 def _unquote_env_value(raw: str) -> str:
     value = raw.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-        return value[1:-1]
-    return value
+    if not value:
+        return ""
+    if value[0] in ('"', "'"):
+        quote = value[0]
+        escaped = False
+        for idx in range(1, len(value)):
+            ch = value[idx]
+            if quote == '"' and escaped:
+                escaped = False
+                continue
+            if quote == '"' and ch == "\\":
+                escaped = True
+                continue
+            if ch == quote:
+                trailing = value[idx + 1 :].strip()
+                if not trailing or trailing.startswith("#"):
+                    return value[1:idx]
+                break
+        return value
+    if value.startswith("#"):
+        return ""
+    return re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
 
 
 def parse_env_file(env_path: Path) -> tuple[dict[str, str], list[str]]:
@@ -60,11 +85,12 @@ def parse_env_file(env_path: Path) -> tuple[dict[str, str], list[str]]:
         if not key:
             continue
 
+        value = _unquote_env_value(raw_value)
         if is_sensitive_key(key):
             excluded.append(key)
             continue
 
-        env_vars[key] = _unquote_env_value(raw_value)
+        env_vars[key] = value
 
     return env_vars, excluded
 

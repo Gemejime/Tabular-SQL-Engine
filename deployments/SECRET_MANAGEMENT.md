@@ -84,13 +84,18 @@ Create an R2 API token in the Cloudflare dashboard with **Object Read only** (or
 ## 5. Local Development & Manual Operations
 
 ### Local Development
-Put your development R2 (or local MinIO) credentials in `.env` (which is gitignored):
+Put your `TABULAR_WORKER_*` S3 settings in `.env` (which is gitignored):
 
 ```dotenv
-AWS_ACCESS_KEY_ID=your-dev-r2-access-key-id
-AWS_SECRET_ACCESS_KEY=your-dev-r2-secret-access-key
 TABULAR_WORKER_S3_ENDPOINT_URL=https://<CLOUDFLARE_ACCOUNT_ID>.r2.cloudflarestorage.com
 TABULAR_WORKER_S3_REGION=auto
+```
+
+> **Note:** `Settings` uses `env_prefix="TABULAR_WORKER_"` with `extra="ignore"` and does **not** load unprefixed `AWS_*` keys from `.env` into the process environment. Export your development R2 (or local MinIO) credentials in the shell environment that launches the worker so its S3 client (`aioboto3`/`botocore`) can read them:
+
+```bash
+export AWS_ACCESS_KEY_ID=your-dev-r2-access-key-id
+export AWS_SECRET_ACCESS_KEY=your-dev-r2-secret-access-key
 ```
 
 ### Secret Rotation

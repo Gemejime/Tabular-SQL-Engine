@@ -18,7 +18,7 @@ spec:
     metadata:
       labels:
         {{- include "rag-tabular-analytics-worker.selectorLabels" . | nindent 8 }}
-      {{- $httpPort := default 8080 .Values.env.TABULAR_WORKER_HTTP_PORT | int | quote }}
+      {{- $httpPort := default 8080 .Values.env.TABULAR_WORKER_HTTP_PORT | int | toString }}
       {{- $annotations := merge (dict "prometheus.io/port" $httpPort) (default dict .Values.podAnnotations) }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}

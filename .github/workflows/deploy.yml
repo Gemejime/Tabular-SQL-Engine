@@ -92,12 +92,18 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Deploy Helm chart
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
+          if [[ ! "${IMAGE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "ERROR: Invalid image_tag '${IMAGE_TAG}'." >&2
+            exit 1
+          fi
           helm upgrade --install "${RELEASE_NAME}" deployments/helm \
             --namespace "${KUBE_NAMESPACE}" \
             --values deployments/helm/values.yaml \
             --values "${VALUES_OVERRIDE}" \
-            --set "image.tag=${{ inputs.image_tag }}" \
+            --set "image.tag=${IMAGE_TAG}" \
             --wait \
             --timeout 5m

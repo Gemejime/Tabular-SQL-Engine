@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future
 
@@ -75,23 +76,33 @@ class _OwnedFlightBatchIterator:
         self._stream_bytes = 0
         self._cleanup_lock = threading.Lock()
         self._cleaned_up = False
+        self._aborted = False
 
     def __iter__(self) -> Iterator[pa.RecordBatch]:
         return self
 
+    def _terminal_exception(self) -> BaseException:
+        if self._aborted:
+            return fl.FlightCancelledError("Query stream aborted during shutdown.")
+        return StopIteration()
+
     def __next__(self) -> pa.RecordBatch:
         with self._cleanup_lock:
             if self._cleaned_up:
-                raise StopIteration
+                raise self._terminal_exception()
         try:
             batch = next(self._batch_iter)
         except StopIteration:
+            with self._cleanup_lock:
+                aborted = self._aborted
             self._cleanup()
+            if aborted:
+                raise fl.FlightCancelledError("Query stream aborted during shutdown.") from None
             raise
         except QueryTimeoutError as exc:
             with self._cleanup_lock:
                 if self._cleaned_up:
-                    raise StopIteration from None
+                    raise self._terminal_exception() from None
             self._stream_status = "timeout"
             self._metrics.inc_subprocess_recycle(RecycleReason.TIMEOUT.value)
             if self._exec_span is not None:
@@ -101,7 +112,7 @@ class _OwnedFlightBatchIterator:
         except WorkerCrashError as exc:
             with self._cleanup_lock:
                 if self._cleaned_up:
-                    raise StopIteration from None
+                    raise self._terminal_exception() from None
             self._stream_status = "worker_crash"
             self._metrics.inc_subprocess_recycle(exc.reason.value)
             if self._exec_span is not None:
@@ -111,7 +122,7 @@ class _OwnedFlightBatchIterator:
         except Exception as exc:
             with self._cleanup_lock:
                 if self._cleaned_up:
-                    raise StopIteration from None
+                    raise self._terminal_exception() from None
             self._stream_status = "error"
             if self._exec_span is not None:
                 record_sanitized_exception(self._exec_span, exc)
@@ -124,8 +135,11 @@ class _OwnedFlightBatchIterator:
 
     def close(self) -> None:
         """Close underlying stream and release owned resources idempotently."""
-        if not self._cleaned_up and self._stream_status == "ok":
-            self._stream_status = "closed"
+        with self._cleanup_lock:
+            if not self._cleaned_up:
+                self._aborted = True
+                if self._stream_status == "ok":
+                    self._stream_status = "closed"
         self._cleanup()
 
     def __del__(self) -> None:
@@ -194,8 +208,8 @@ class FlightHandlers:
         self._hydration_loop = hydration_loop
         self._metrics = metrics
         self._concurrency_semaphore = threading.BoundedSemaphore(settings.MAX_CONCURRENT_QUERIES)
-        self._active_streams_lock = threading.Lock()
-        self._active_streams: set[_OwnedFlightBatchIterator] = set()
+        self._active_streams_lock = threading.RLock()
+        self._active_streams: weakref.WeakSet[_OwnedFlightBatchIterator] = weakref.WeakSet()
 
     def _unregister_stream(self, stream: _OwnedFlightBatchIterator) -> None:
         with self._active_streams_lock:
