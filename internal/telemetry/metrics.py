@@ -54,6 +54,10 @@ class MetricsRegistry:
             labelnames=("reason",),
             registry=self._registry,
         )
+        # Initialize abnormal recycle series to 0 so Prometheus rate() queries
+        # return a zero rate rather than an empty vector on healthy workers.
+        for reason in ("TIMEOUT", "MEMORY_LIMIT", "CRASH"):
+            self.subprocess_recycles_total.labels(reason=reason)
         self.flight_stream_bytes_total = Counter(
             "tabular_worker_flight_stream_bytes_total",
             "Total zero-copy Arrow Flight bytes streamed",

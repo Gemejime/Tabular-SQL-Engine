@@ -18,7 +18,9 @@ spec:
     metadata:
       labels:
         {{- include "rag-tabular-analytics-worker.selectorLabels" . | nindent 8 }}
-      {{- with .Values.podAnnotations }}
+      {{- $httpPort := default 8080 .Values.env.TABULAR_WORKER_HTTP_PORT | int | quote }}
+      {{- $annotations := merge (dict "prometheus.io/port" $httpPort) (default dict .Values.podAnnotations) }}
+      {{- with $annotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

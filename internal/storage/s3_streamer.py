@@ -73,11 +73,20 @@ class S3Streamer:
     async def close(self) -> None:
         """Close the aiobotocore S3 client inside the active asyncio event loop."""
         async with self._client_lock:
-            if self._client_ctx is not None:
-                await self._client_ctx.__aexit__(None, None, None)
+            try:
+                if self._client_ctx is not None:
+                    await self._client_ctx.__aexit__(None, None, None)
+            finally:
                 self._client_ctx = None
-            if self._injected_client is None:
-                self._client = None
+                if self._injected_client is None:
+                    self._client = None
+
+    def reset_client_state(self) -> None:
+        """Reset client handles after a timed-out or stopped hydration loop."""
+        self._client_ctx = None
+        if self._injected_client is None:
+            self._client = None
+        self._client_lock = asyncio.Lock()
 
     async def stream_to_file(
         self,

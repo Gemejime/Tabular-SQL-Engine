@@ -181,6 +181,32 @@ class WorkerDaemon:
             self.shutdown()
             raise
 
+    def _shutdown_flight_server(self, drain_timeout_seconds: float = 5.0) -> None:
+        """Bound Flight server drain and abort stalled GeneratorStream responses on timeout."""
+        server = self.flight_server
+        if server is None:
+            return
+        self.flight_server = None
+
+        def _drain() -> None:
+            server.shutdown()
+            server.wait()
+
+        drain_thread = threading.Thread(
+            target=_drain,
+            name="arrow-flight-drain",
+            daemon=True,
+        )
+        drain_thread.start()
+        drain_thread.join(timeout=drain_timeout_seconds)
+        if drain_thread.is_alive():
+            closed_streams = self.handlers.close_active_streams()
+            _logger.warning(
+                "Flight server drain timed out; closed active streams",
+                extra={"extra_fields": {"closed_streams": closed_streams}},
+            )
+            drain_thread.join(timeout=1.0)
+
     def shutdown(self) -> None:
         """Gracefully drain readiness, shut down Flight server, pool, S3 client, and loop."""
         if self._is_shut_down:
@@ -191,36 +217,51 @@ class WorkerDaemon:
 
         _logger.info("Initiating graceful shutdown drain")
 
-        if self.flight_server is not None:
-            self.flight_server.shutdown()
-            self.flight_server.wait()
-            self.flight_server = None
+        first_exc: BaseException | None = None
+        try:
+            self._shutdown_flight_server(drain_timeout_seconds=5.0)
+        except BaseException as exc:
+            first_exc = exc
+
         if self._flight_thread is not None:
             if self._flight_thread.is_alive():
                 self._flight_thread.join(timeout=5.0)
             self._flight_thread = None
 
-        self.process_manager.close()
+        try:
+            self.process_manager.close()
+        except BaseException as exc:
+            if first_exc is None:
+                first_exc = exc
 
         if self.ops_server is not None:
-            self.ops_server.close()
-            self.ops_server = None
-
-        first_exc: BaseException | None = None
-        if self.hydration_thread.loop.is_running():
             try:
-                asyncio.run_coroutine_threadsafe(
-                    self.s3_streamer.close(),
-                    self.hydration_thread.loop,
-                ).result(timeout=5.0)
+                self.ops_server.close()
             except BaseException as exc:
-                first_exc = exc
+                if first_exc is None:
+                    first_exc = exc
+            finally:
+                self.ops_server = None
+
+        if self.hydration_thread.loop.is_running():
+            close_future = asyncio.run_coroutine_threadsafe(
+                self.s3_streamer.close(),
+                self.hydration_thread.loop,
+            )
+            try:
+                close_future.result(timeout=5.0)
+            except BaseException as exc:
+                close_future.cancel()
+                if first_exc is None:
+                    first_exc = exc
 
         try:
             self.hydration_thread.stop()
         except BaseException as exc:
             if first_exc is None:
                 first_exc = exc
+        finally:
+            self.s3_streamer.reset_client_state()
 
         try:
             shutdown_tracing()

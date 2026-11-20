@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
 
 import pyarrow as pa
@@ -57,6 +57,7 @@ class _OwnedFlightBatchIterator:
         table_hash: str,
         exec_span: Span | None = None,
         trace_id: str | None = None,
+        on_cleanup: Callable[[_OwnedFlightBatchIterator], None] | None = None,
     ) -> None:
         self._query_stream = query_stream
         self._batch_iter = iter(query_stream)
@@ -69,6 +70,7 @@ class _OwnedFlightBatchIterator:
         self._table_hash = table_hash
         self._exec_span = exec_span
         self._trace_id = trace_id
+        self._on_cleanup = on_cleanup
         self._stream_status = "ok"
         self._stream_bytes = 0
         self._cleanup_lock = threading.Lock()
@@ -78,12 +80,18 @@ class _OwnedFlightBatchIterator:
         return self
 
     def __next__(self) -> pa.RecordBatch:
+        with self._cleanup_lock:
+            if self._cleaned_up:
+                raise StopIteration
         try:
             batch = next(self._batch_iter)
         except StopIteration:
             self._cleanup()
             raise
         except QueryTimeoutError as exc:
+            with self._cleanup_lock:
+                if self._cleaned_up:
+                    raise StopIteration from None
             self._stream_status = "timeout"
             self._metrics.inc_subprocess_recycle(RecycleReason.TIMEOUT.value)
             if self._exec_span is not None:
@@ -91,6 +99,9 @@ class _OwnedFlightBatchIterator:
             self._cleanup()
             raise map_exception_to_flight_error(exc) from exc
         except WorkerCrashError as exc:
+            with self._cleanup_lock:
+                if self._cleaned_up:
+                    raise StopIteration from None
             self._stream_status = "worker_crash"
             self._metrics.inc_subprocess_recycle(exc.reason.value)
             if self._exec_span is not None:
@@ -98,6 +109,9 @@ class _OwnedFlightBatchIterator:
             self._cleanup()
             raise map_exception_to_flight_error(exc) from exc
         except Exception as exc:
+            with self._cleanup_lock:
+                if self._cleaned_up:
+                    raise StopIteration from None
             self._stream_status = "error"
             if self._exec_span is not None:
                 record_sanitized_exception(self._exec_span, exc)
@@ -129,6 +143,8 @@ class _OwnedFlightBatchIterator:
         self._metrics.dec_active_queries()
         self._pinned.release()
         self._semaphore.release()
+        if self._on_cleanup is not None:
+            self._on_cleanup(self)
         if self._exec_span is not None:
             self._exec_span.set_attributes(
                 sanitize_span_attributes(
@@ -178,6 +194,20 @@ class FlightHandlers:
         self._hydration_loop = hydration_loop
         self._metrics = metrics
         self._concurrency_semaphore = threading.BoundedSemaphore(settings.MAX_CONCURRENT_QUERIES)
+        self._active_streams_lock = threading.Lock()
+        self._active_streams: set[_OwnedFlightBatchIterator] = set()
+
+    def _unregister_stream(self, stream: _OwnedFlightBatchIterator) -> None:
+        with self._active_streams_lock:
+            self._active_streams.discard(stream)
+
+    def close_active_streams(self) -> int:
+        """Force-close any active GeneratorStream iterators during shutdown drain timeout."""
+        with self._active_streams_lock:
+            streams = list(self._active_streams)
+        for stream in streams:
+            stream.close()
+        return len(streams)
 
     def set_hydration_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Update the asyncio event loop used for S3 hydration."""
@@ -356,7 +386,10 @@ class FlightHandlers:
                     table_hash=ticket.table_hash,
                     exec_span=exec_span,
                     trace_id=get_current_trace_id(),
+                    on_cleanup=self._unregister_stream,
                 )
+                with self._active_streams_lock:
+                    self._active_streams.add(owned_iter)
                 handed_off = True
                 return fl.GeneratorStream(query_stream.schema, owned_iter)
             except QueryTimeoutError as exc:
