@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from sqlglot import exp
+
+# sqlglot <29 uses exp.Expression as the AST base class, while sqlglot >=29 uses exp.Expr.
+type ASTNode = Any
+_AST_NODE_BASE: type[Any] = getattr(exp, "Expr", exp.Expression)
 
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 # Top-level root statements permitted by the sandbox.
-ALLOWED_ROOT_EXPRESSIONS: tuple[type[exp.Expression], ...] = (
+ALLOWED_ROOT_EXPRESSIONS: tuple[type[ASTNode], ...] = (
     exp.Select,
     exp.Union,
     exp.Intersect,
@@ -18,18 +23,18 @@ ALLOWED_ROOT_EXPRESSIONS: tuple[type[exp.Expression], ...] = (
 )
 
 
-def _optional_exp_nodes(*names: str) -> tuple[type[exp.Expression], ...]:
-    """Return sqlglot Expression subclasses that exist in the installed sqlglot version."""
-    nodes: list[type[exp.Expression]] = []
+def _optional_exp_nodes(*names: str) -> tuple[type[ASTNode], ...]:
+    """Return sqlglot AST node subclasses that exist in the installed sqlglot version."""
+    nodes: list[type[ASTNode]] = []
     for name in names:
         cls = getattr(exp, name, None)
-        if isinstance(cls, type) and issubclass(cls, exp.Expression):
+        if isinstance(cls, type) and issubclass(cls, _AST_NODE_BASE):
             nodes.append(cls)
     return tuple(nodes)
 
 
 # Explicitly banned statement/command AST node types.
-BANNED_AST_NODES: tuple[type[exp.Expression], ...] = (
+BANNED_AST_NODES: tuple[type[ASTNode], ...] = (
     exp.Command,
     exp.Insert,
     exp.Update,
@@ -312,7 +317,7 @@ ALLOWED_ANONYMOUS_FUNCTIONS: frozenset[str] = frozenset(
 )
 
 # Complete allowlist of non-function AST node types permitted in read-only SELECT queries.
-ALLOWED_STRUCTURAL_NODES: tuple[type[exp.Expression], ...] = (
+ALLOWED_STRUCTURAL_NODES: tuple[type[ASTNode], ...] = (
     # Query & set operations
     exp.Select,
     exp.With,

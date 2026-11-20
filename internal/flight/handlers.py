@@ -9,6 +9,7 @@ import time
 import weakref
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future
+from typing import NoReturn
 
 import pyarrow as pa
 import pyarrow.flight as fl
@@ -81,15 +82,15 @@ class _OwnedFlightBatchIterator:
     def __iter__(self) -> Iterator[pa.RecordBatch]:
         return self
 
-    def _terminal_exception(self) -> BaseException:
+    def _raise_terminal_exception(self) -> NoReturn:
         if self._aborted:
-            return fl.FlightCancelledError("Query stream aborted during shutdown.")
-        return StopIteration()
+            raise fl.FlightCancelledError("Query stream aborted during shutdown.") from None
+        raise StopIteration from None
 
     def __next__(self) -> pa.RecordBatch:
         with self._cleanup_lock:
             if self._cleaned_up:
-                raise self._terminal_exception()
+                self._raise_terminal_exception()
         try:
             batch = next(self._batch_iter)
         except StopIteration:
@@ -102,7 +103,7 @@ class _OwnedFlightBatchIterator:
         except QueryTimeoutError as exc:
             with self._cleanup_lock:
                 if self._cleaned_up:
-                    raise self._terminal_exception() from None
+                    self._raise_terminal_exception()
             self._stream_status = "timeout"
             self._metrics.inc_subprocess_recycle(RecycleReason.TIMEOUT.value)
             if self._exec_span is not None:
@@ -112,7 +113,7 @@ class _OwnedFlightBatchIterator:
         except WorkerCrashError as exc:
             with self._cleanup_lock:
                 if self._cleaned_up:
-                    raise self._terminal_exception() from None
+                    self._raise_terminal_exception()
             self._stream_status = "worker_crash"
             self._metrics.inc_subprocess_recycle(exc.reason.value)
             if self._exec_span is not None:
@@ -122,7 +123,7 @@ class _OwnedFlightBatchIterator:
         except Exception as exc:
             with self._cleanup_lock:
                 if self._cleaned_up:
-                    raise self._terminal_exception() from None
+                    self._raise_terminal_exception()
             self._stream_status = "error"
             if self._exec_span is not None:
                 record_sanitized_exception(self._exec_span, exc)

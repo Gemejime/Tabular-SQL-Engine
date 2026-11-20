@@ -24,6 +24,7 @@ from internal.validator.rules import (
     BANNED_FUNCTION_NAMES,
     BANNED_FUNCTION_PREFIXES,
     SAFE_IDENTIFIER_RE,
+    ASTNode,
 )
 
 
@@ -33,13 +34,13 @@ class ASTValidator:
     def __init__(self, *, max_sql_length: int = 8192, max_joins: int = 5) -> None:
         self._max_sql_length = max_sql_length
         self._max_joins = max_joins
-        self._banned_type_cache: dict[type[exp.Expression], bool] = {}
-        self._allowed_type_cache: dict[type[exp.Expression], bool] = {}
+        self._banned_type_cache: dict[type[ASTNode], bool] = {}
+        self._allowed_type_cache: dict[type[ASTNode], bool] = {}
         self._dialect = Dialect.get_or_raise("duckdb")
         # Pre-warm sqlglot DuckDB dialect parser so steady-state validation stays <= 2 ms.
         sqlglot.parse_one("SELECT 1", read=self._dialect)
 
-    def _is_banned_node(self, node: exp.Expression) -> bool:
+    def _is_banned_node(self, node: ASTNode) -> bool:
         node_type = type(node)
         cached = self._banned_type_cache.get(node_type)
         if cached is None:
@@ -47,7 +48,7 @@ class ASTValidator:
             self._banned_type_cache[node_type] = cached
         return cached
 
-    def _is_allowed_node(self, node: exp.Expression) -> bool:
+    def _is_allowed_node(self, node: ASTNode) -> bool:
         node_type = type(node)
         cached = self._allowed_type_cache.get(node_type)
         if cached is None:
@@ -55,7 +56,7 @@ class ASTValidator:
             self._allowed_type_cache[node_type] = cached
         return cached
 
-    def validate(self, sql: str, allowed_table_alias: str) -> exp.Expression:
+    def validate(self, sql: str, allowed_table_alias: str) -> ASTNode:
         """Validate SQL against length, syntax, statement, function, table, alias, and join rules.
 
         Args:
@@ -128,7 +129,7 @@ class ASTValidator:
         return root
 
     @staticmethod
-    def _is_approved_date_unit_var(node: exp.Expression) -> bool:
+    def _is_approved_date_unit_var(node: ASTNode) -> bool:
         """Allow exp.Var only when used as an approved unit argument on date functions."""
         if not isinstance(node, exp.Var) or node.arg_key != "unit":
             return False
@@ -140,7 +141,7 @@ class ASTValidator:
         return node.name.lower() in APPROVED_DATE_UNITS
 
     @staticmethod
-    def _validate_cte_aliases(root: exp.Expression) -> None:
+    def _validate_cte_aliases(root: ASTNode) -> None:
         """Validate all CTE alias identifiers defined in WITH clauses."""
         for cte in root.find_all(exp.CTE):
             alias_name = cte.alias_or_name
@@ -148,8 +149,8 @@ class ASTValidator:
                 raise DisallowedAliasError(f"Invalid CTE alias: {alias_name!r}")
 
     @staticmethod
-    def _is_descendant_or_self(node: exp.Expression, ancestor: exp.Expression) -> bool:
-        curr: exp.Expression | None = node
+    def _is_descendant_or_self(node: ASTNode, ancestor: ASTNode) -> bool:
+        curr: ASTNode | None = node
         while curr is not None:
             if curr is ancestor:
                 return True
@@ -160,7 +161,7 @@ class ASTValidator:
     def _visible_cte_names(cls, table: exp.Table) -> set[str]:
         """Collect CTE names visible from ``table``'s lexical SQL scope."""
         visible: set[str] = set()
-        child: exp.Expression = table
+        child: ASTNode = table
         curr = table.parent
         while curr is not None:
             with_clause = curr.args.get("with_") or curr.args.get("with")
