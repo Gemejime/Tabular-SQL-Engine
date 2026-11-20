@@ -18,12 +18,17 @@ def test_sync_and_check_only_preserve_blocks_and_secret_name(tmp_path: Path) -> 
         "\n".join(
             [
                 "# comment",
-                "TABULAR_WORKER_LOG_LEVEL=INFO",
+                "TABULAR_WORKER_LOG_LEVEL=INFO # inline comment",
                 "TABULAR_WORKER_POOL_SIZE=8",
+                'TABULAR_WORKER_QUOTED_HASH="literal#hash" # trailing comment',
+                "TABULAR_WORKER_SINGLE_QUOTED_HASH='single#hash'",
+                "TABULAR_WORKER_OTEL_ENABLED=true",
+                "TABULAR_WORKER_OTEL_EXPORTER_ENDPOINT=http://otel:4317",
                 "AWS_SECRET_ACCESS_KEY=super-secret",
                 "DB_PASSWORD=hunter2",
                 "API_TOKEN=tok_123",
                 "SIGNING_KEY=key_abc",
+                "OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer secret",
             ]
         )
         + "\n",
@@ -41,6 +46,7 @@ def test_sync_and_check_only_preserve_blocks_and_secret_name(tmp_path: Path) -> 
                 "env:",
                 '  secretName: "my-k8s-secret"',
                 '  TABULAR_WORKER_LOG_LEVEL: "DEBUG"',
+                '  OTEL_EXPORTER_OTLP_HEADERS: "stale-secret"',
                 "keda:",
                 "  enabled: true",
             ]
@@ -51,9 +57,7 @@ def test_sync_and_check_only_preserve_blocks_and_secret_name(tmp_path: Path) -> 
 
     # Drift detected before sync
     assert (
-        sync_main(
-            ["--check-only", "--env-file", str(env_file), "--values-file", str(values_file)]
-        )
+        sync_main(["--check-only", "--env-file", str(env_file), "--values-file", str(values_file)])
         == 1
     )
 
@@ -64,9 +68,7 @@ def test_sync_and_check_only_preserve_blocks_and_secret_name(tmp_path: Path) -> 
 
     # Zero drift after sync
     assert (
-        sync_main(
-            ["--check-only", "--env-file", str(env_file), "--values-file", str(values_file)]
-        )
+        sync_main(["--check-only", "--env-file", str(env_file), "--values-file", str(values_file)])
         == 0
     )
 
@@ -78,6 +80,10 @@ def test_sync_and_check_only_preserve_blocks_and_secret_name(tmp_path: Path) -> 
         "secretName": "my-k8s-secret",
         "TABULAR_WORKER_LOG_LEVEL": "INFO",
         "TABULAR_WORKER_POOL_SIZE": "8",
+        "TABULAR_WORKER_QUOTED_HASH": "literal#hash",
+        "TABULAR_WORKER_SINGLE_QUOTED_HASH": "single#hash",
+        "TABULAR_WORKER_OTEL_ENABLED": "true",
+        "TABULAR_WORKER_OTEL_EXPORTER_ENDPOINT": "http://otel:4317",
     }
 
 
