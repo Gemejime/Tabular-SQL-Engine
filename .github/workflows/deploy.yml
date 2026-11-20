@@ -1,0 +1,103 @@
+name: Deploy rag-tabular-analytics-worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target deployment environment"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - prod
+      image_tag:
+        description: "Container image tag to deploy"
+        required: false
+        default: "0.1.0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Inject Secrets & Deploy (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      RELEASE_NAME: rag-tabular-analytics-worker
+      SECRET_NAME: rag-tabular-analytics-worker-secrets
+      KUBE_NAMESPACE: ${{ inputs.environment == 'prod' && 'rag-tabular-prod' || 'rag-tabular-staging' }}
+      VALUES_OVERRIDE: ${{ inputs.environment == 'prod' && 'deployments/helm/values-prod.yaml' || 'deployments/helm/values-staging.yaml' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Configure kubeconfig
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KUBE_CONFIG_DATA}" ]; then
+            echo "ERROR: KUBE_CONFIG_DATA secret is not configured for environment '${{ inputs.environment }}'." >&2
+            exit 1
+          fi
+          mkdir -p "${HOME}/.kube"
+          printf '%s' "${KUBE_CONFIG_DATA}" | base64 --decode > "${HOME}/.kube/config"
+          chmod 600 "${HOME}/.kube/config"
+
+      - name: Ensure target namespace exists
+        run: |
+          set -euo pipefail
+          kubectl create namespace "${KUBE_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Inject Kubernetes Secret (Cloudflare R2 S3 credentials)
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          OTEL_EXPORTER_OTLP_HEADERS: ${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${R2_ACCESS_KEY_ID}" ] || [ -z "${R2_SECRET_ACCESS_KEY}" ]; then
+            echo "ERROR: R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY secrets must be set." >&2
+            exit 1
+          fi
+
+          ENV_FILE="$(mktemp)"
+          trap 'rm -f "${ENV_FILE}"' EXIT
+          chmod 600 "${ENV_FILE}"
+
+          {
+            printf 'AWS_ACCESS_KEY_ID=%s\n' "${R2_ACCESS_KEY_ID}"
+            printf 'AWS_SECRET_ACCESS_KEY=%s\n' "${R2_SECRET_ACCESS_KEY}"
+            if [ -n "${OTEL_EXPORTER_OTLP_HEADERS}" ]; then
+              printf 'OTEL_EXPORTER_OTLP_HEADERS=%s\n' "${OTEL_EXPORTER_OTLP_HEADERS}"
+            fi
+          } > "${ENV_FILE}"
+
+          kubectl create secret generic "${SECRET_NAME}" \
+            --namespace "${KUBE_NAMESPACE}" \
+            --from-env-file="${ENV_FILE}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy Helm chart
+        run: |
+          set -euo pipefail
+          helm upgrade --install "${RELEASE_NAME}" deployments/helm \
+            --namespace "${KUBE_NAMESPACE}" \
+            --values deployments/helm/values.yaml \
+            --values "${VALUES_OVERRIDE}" \
+            --set "image.tag=${{ inputs.image_tag }}" \
+            --wait \
+            --timeout 5m
