@@ -29,7 +29,7 @@ def _clear_tabular_worker_env(
     for key in list(os.environ):
         if key.startswith("TABULAR_WORKER_"):
             monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr("internal.config.settings._PROJECT_ROOT", tmp_path)
+    monkeypatch.setitem(Settings.model_config, "env_file", tmp_path / ".env")
     monkeypatch.chdir(tmp_path)
     get_settings.cache_clear()
 

@@ -161,7 +161,7 @@ def test_start_span_disables_automatic_exception_events_with_credentials(
 def test_init_tracing_enabled_start_stop_start_lifecycle() -> None:
     settings = Settings(
         OTEL_ENABLED=True,
-        OTEL_EXPORTER_ENDPOINT="http://127.0.0.1:4317",
+        OTEL_EXPORTER_ENDPOINT=None,
         OTEL_SERVICE_NAME="tabular-worker-test",
     )
     try:
