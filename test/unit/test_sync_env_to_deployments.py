@@ -22,6 +22,7 @@ def test_sync_and_check_only_preserve_blocks_and_secret_name(tmp_path: Path) -> 
                 "TABULAR_WORKER_POOL_SIZE=8",
                 'TABULAR_WORKER_QUOTED_HASH="literal#hash" # trailing comment',
                 "TABULAR_WORKER_SINGLE_QUOTED_HASH='single#hash'",
+                r'TABULAR_WORKER_S3_BUCKET_ALLOWLIST="[\"bucket-a\",\"bucket-b\"]"',
                 "TABULAR_WORKER_OTEL_ENABLED=true",
                 "TABULAR_WORKER_OTEL_EXPORTER_ENDPOINT=http://otel:4317",
                 "AWS_SECRET_ACCESS_KEY=super-secret",
@@ -82,6 +83,7 @@ def test_sync_and_check_only_preserve_blocks_and_secret_name(tmp_path: Path) -> 
         "TABULAR_WORKER_POOL_SIZE": "8",
         "TABULAR_WORKER_QUOTED_HASH": "literal#hash",
         "TABULAR_WORKER_SINGLE_QUOTED_HASH": "single#hash",
+        "TABULAR_WORKER_S3_BUCKET_ALLOWLIST": '["bucket-a","bucket-b"]',
         "TABULAR_WORKER_OTEL_ENABLED": "true",
         "TABULAR_WORKER_OTEL_EXPORTER_ENDPOINT": "http://otel:4317",
     }

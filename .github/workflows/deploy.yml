@@ -104,6 +104,6 @@ jobs:
             --namespace "${KUBE_NAMESPACE}" \
             --values deployments/helm/values.yaml \
             --values "${VALUES_OVERRIDE}" \
-            --set "image.tag=${IMAGE_TAG}" \
+            --set-string "image.tag=${IMAGE_TAG}" \
             --wait \
             --timeout 5m

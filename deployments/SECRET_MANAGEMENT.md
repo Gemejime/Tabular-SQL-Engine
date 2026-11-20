@@ -87,6 +87,7 @@ Create an R2 API token in the Cloudflare dashboard with **Object Read only** (or
 Put your `TABULAR_WORKER_*` S3 settings in `.env` (which is gitignored):
 
 ```dotenv
+TABULAR_WORKER_S3_BUCKET_ALLOWLIST=["your-dev-bucket"]
 TABULAR_WORKER_S3_ENDPOINT_URL=https://<CLOUDFLARE_ACCOUNT_ID>.r2.cloudflarestorage.com
 TABULAR_WORKER_S3_REGION=auto
 ```

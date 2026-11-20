@@ -55,7 +55,10 @@ def _unquote_env_value(raw: str) -> str:
             if ch == quote:
                 trailing = value[idx + 1 :].strip()
                 if not trailing or trailing.startswith("#"):
-                    return value[1:idx]
+                    inner = value[1:idx]
+                    if quote == '"':
+                        inner = inner.replace('\\"', '"')
+                    return inner
                 break
         return value
     if value.startswith("#"):
