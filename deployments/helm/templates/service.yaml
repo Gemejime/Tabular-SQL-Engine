@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rag-tabular-analytics-worker.fullname" . }}
+  labels:
+    {{- include "rag-tabular-analytics-worker.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- if .Values.service.headless }}
+  clusterIP: None
+  {{- end }}
+  selector:
+    {{- include "rag-tabular-analytics-worker.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+    - name: http
+      port: {{ .Values.service.httpPort }}
+      targetPort: http
+      protocol: TCP
