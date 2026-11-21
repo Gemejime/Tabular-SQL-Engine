@@ -20,7 +20,7 @@ See [`architecture.md`](architecture.md) for the full 5-layer backend architectu
   - Async `aiobotocore` S3 range-read streaming (`8 MiB` chunks) over internal VPC endpoints without monolithic Python heap buffering.
   - `TableResolver` enforces `S3_BUCKET_ALLOWLIST` and canonical `s3_key == artifacts/{tenant_id}/{table_hash}.parquet` tenant isolation.
 - **Ephemeral DuckDB Sandbox Runtime (`internal/sandbox/`)**:
-  - Opens `duckdb.connect(":memory:")` (`duckdb >= 1.2.0`), configures `allowed_paths` for only the single validated `{hash}.parquet` artifact, and locks `enable_external_access = false`, `lock_configuration = true`, `temp_directory = ''`, `threads = 2`, and per-worker `memory_limit` (`floor(2.5 GiB / POOL_SIZE)` in `MiB`, e.g., `640MiB` at `POOL_SIZE=4`).
+  - `apply_sandbox_lock` (`internal/sandbox/security_profile.py`) opens `duckdb.connect(":memory:")`, configures `temp_directory = ''`, per-worker `memory_limit` (`floor(2.5 GiB / POOL_SIZE)` in `MiB`, e.g., `640MiB` at `POOL_SIZE=4`), and `threads = 2`, materializes only the single validated `{hash}.parquet` artifact as a temp table (`CREATE TEMP TABLE "<table_alias>" AS SELECT * FROM read_parquet(...)`), and immediately locks `enable_external_access = false` and `lock_configuration = true`.
   - Streams chunked PyArrow `RecordBatch` frames via `RecordBatchReader` without `fetch_arrow_table()` full materialization.
 - **Disposable Subprocess Pool & Circuit Breaker (`internal/pool/`)**:
   - `pebble.ProcessPool` supervisor (`max_workers=POOL_SIZE`, `max_tasks=100`) streaming Arrow IPC `RecordBatch` chunks over an OS pipe / `multiprocessing.connection`.
@@ -43,6 +43,11 @@ source .venv/bin/activate
 pip install -e ".[dev,test]"
 cp .env.example .env
 ```
+
+Before starting the daemon locally, edit `.env`:
+
+- **S3 bucket allowlist & access**: Add your bucket(s) to `TABULAR_WORKER_S3_BUCKET_ALLOWLIST` (e.g., `["my-tabular-bucket"]`) and configure S3 access (`TABULAR_WORKER_S3_ENDPOINT_URL`, `TABULAR_WORKER_S3_REGION`, and AWS credentials). `TableResolver` fails closed and rejects all buckets when `TABULAR_WORKER_S3_BUCKET_ALLOWLIST` is empty.
+- **Writable cache directory**: Set `TABULAR_WORKER_CACHE_DIR` to a writable local path (e.g., `./.cache/tabular-worker`), or create `/var/cache/tabular-worker` and grant write permissions to the user running the daemon before startup.
 
 Start the worker daemon locally:
 

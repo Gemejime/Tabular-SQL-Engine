@@ -28,7 +28,7 @@ flowchart LR
 ### End-to-End Execution Flow
 
 1. **Flight Ingress**: `TabularFlightServer` (`internal/flight/server.py`) receives a `DoGet(Ticket)` or `DoAction(Action)` request with optional W3C `traceparent`/`tracestate` metadata.
-2. **Backpressure & Concurrency Guard**: `FlightHandlers` (`internal/flight/handlers.py`) enforces `MAX_CONCURRENT_QUERIES` via a bounded semaphore, returning gRPC `RESOURCE_EXHAUSTED` when saturated.
+2. **Backpressure & Concurrency Guard**: `FlightHandlers` (`internal/flight/handlers.py`) enforces `MAX_CONCURRENT_QUERIES` via a bounded semaphore; when saturated, `map_exception_to_flight_error` (`api/flight/schema.py`) returns a generic `FlightServerError` failure status with `RESOURCE_EXHAUSTED` in the error message text as the retry signal.
 3. **AST Whitelisting ($\le 2\text{ ms}$)**: `ASTValidator` (`internal/validator/ast_validator.py`) parses the SQL with `sqlglot`, allowing only read-only `Select`, `With` (CTEs), `Union`/`Intersect`/`Except`, and `Subquery` constructs with pre-approved functions and bounded join counts (`MAX_JOINS`).
 4. **Tenant & S3 Path Validation**: `TableResolver` (`internal/storage/table_resolver.py`) checks `s3_bucket` against `S3_BUCKET_ALLOWLIST` and verifies `s3_key == f"artifacts/{tenant_id}/{table_hash}.parquet"` to prevent confused-deputy cross-tenant reads (`PERMISSION_DENIED`).
 5. **Tier-1 Cache & Single-Flight S3 Hydration**: `CacheManager` (`internal/storage/cache_manager.py`) checks `<CACHE_DIR>/{s3_bucket}/{tenant_id}/{table_hash}.parquet`. On a miss, `HydrationLoopThread` (`internal/flight/daemon.py`) bridges the synchronous gRPC thread to an `asyncio` event loop running `S3Streamer` (`internal/storage/s3_streamer.py`), which streams ranged reads from S3 to a temp file and atomically commits via `os.replace`.
@@ -90,12 +90,9 @@ flowchart LR
   - Permits only `Select`, `With`, `Union`/`Intersect`/`Except`, and `Subquery` nodes with pre-approved functions (`rules.py`).
   - Blocks DML/DDL, `PRAGMA`, `SET`, `RESET`, `COPY`, `ATTACH`, `DETACH`, `LOAD`, `INSTALL`, `SUMMARIZE`, `DESCRIBE`, `SHOW`, `PIVOT`, and DuckDB filesystem/network functions (`read_csv`, `read_parquet`, `scan_parquet`, `write_csv`).
 - **DuckDB Sandbox Locks (`internal/sandbox/security_profile.py`, `duckdb_runtime.py`)**:
-  - Opens `duckdb.connect(":memory:")`, configures `allowed_paths = ['<validated_parquet_path>']`, binds a single temp table/view for the validated `{hash}.parquet` file, and immediately locks:
+  - `apply_sandbox_lock` opens `duckdb.connect(":memory:")`, configures `temp_directory = ''`, `memory_limit = '<worker_memory_limit_mib>MiB'`, and `threads = 2`, materializes the single validated `{hash}.parquet` artifact as a temp table (`CREATE TEMP TABLE "<table_alias>" AS SELECT * FROM read_parquet(...)`), and immediately locks:
     - `SET enable_external_access = false`
     - `SET lock_configuration = true`
-    - `SET temp_directory = ''`
-    - `SET threads = 2`
-    - `SET memory_limit = '<worker_memory_limit_mib>MiB'`
 - **Secured Logging & Container Hardening**:
   - `internal/telemetry/logging.py` emits structured JSON logs and redacts `Authorization`/`Bearer` headers, AWS credentials, presigned S3 query params (`X-Amz-Signature`, `X-Amz-Credential`, `X-Amz-Security-Token`), and sensitive PII/literals.
   - Multi-stage non-root container (`uid=10001`, `readOnlyRootFilesystem: true`, `capabilities.drop: ["ALL"]`) with `jemalloc` preloaded.
