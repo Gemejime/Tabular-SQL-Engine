@@ -46,7 +46,7 @@ cp .env.example .env
 
 Before starting the daemon locally, edit `.env`:
 
-- **S3 bucket allowlist & access**: Add your bucket(s) to `TABULAR_WORKER_S3_BUCKET_ALLOWLIST` (e.g., `["my-tabular-bucket"]`) and configure S3 access (`TABULAR_WORKER_S3_ENDPOINT_URL`, `TABULAR_WORKER_S3_REGION`, and AWS credentials). `TableResolver` fails closed and rejects all buckets when `TABULAR_WORKER_S3_BUCKET_ALLOWLIST` is empty.
+- **S3 bucket allowlist & access**: Add your bucket(s) to `TABULAR_WORKER_S3_BUCKET_ALLOWLIST` (e.g., `["my-tabular-bucket"]`) and configure `TABULAR_WORKER_S3_ENDPOINT_URL` / `TABULAR_WORKER_S3_REGION` as needed. `TableResolver` fails closed and rejects all buckets when `TABULAR_WORKER_S3_BUCKET_ALLOWLIST` is empty. Note that `Settings` ignores non-`TABULAR_WORKER_` keys in `.env` and does not populate `os.environ`, so configure AWS credentials via an AWS profile or export `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (and `AWS_SESSION_TOKEN` if applicable) in your shell so `S3Streamer`'s `aiobotocore` provider chain can use them.
 - **Writable cache directory**: Set `TABULAR_WORKER_CACHE_DIR` to a writable local path (e.g., `./.cache/tabular-worker`), or create `/var/cache/tabular-worker` and grant write permissions to the user running the daemon before startup.
 
 Start the worker daemon locally:
